@@ -126,7 +126,7 @@ def main():
             for (x, y), count in merged_result:
                 x_coord = int((j*1000000*args.band) + x)
                 y_coord = int((j*1000000*args.band) + y)
-                print(f"({x_coord}, {y_coord}): {count}")
+                #print(f"({x_coord}, {y_coord}): {count}")
                 bed_coordinates.append((seq_list[0],x_coord,y_coord))
     create_bed_file(bed_coordinates, "anianns.bed")
 
