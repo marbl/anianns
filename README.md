@@ -34,7 +34,30 @@ python -m pip install .
 
 ## Usage
 
-Currently, use of is limited to . Classification of satellites into . 
+Currently, use of Ani Ann's is limited to detecting satellites and masking these regions. Classification of satellites, detection of Higher Order Repeats, and other metrics are not yet included. 
+
+Ani Ann's can be run with the flags `annotate` or `mask`:
+
+`annotate/mask -h`
+
+```
+Ani Ann's: **Ani** augmented **Ann**otation of satellite arrays
+
+options:
+  -h, --help            show this help message and exit
+  -f FASTA [FASTA ...], --fasta FASTA [FASTA ...]
+                        Path to input fasta file(s).
+  -b BAND, --band BAND  Max height in Mbp of band. (default: 8.0)
+  -k KMER, --kmer KMER  k-mer length (default: 21)
+  --overlap OVERLAP     Percent overlap. Must be < 0.5. (default: 0.1)
+  --identity IDENTITY   Identity threshold. (default: 86)
+  -o OUTPUT_DIR, --output-dir OUTPUT_DIR
+                        Directory name for saving matrices and coordinate logs. Defaults to working directory. (default: None)
+  -w WINDOW, --window WINDOW
+                        Window size of ModDotPlot. (default: 2000)
+  -m, --mask            Create a masked fasta file. (default: False)
+```
+To both run repeat masker and annotation tools, simply run `annotate -m/--mask.`
 
 `-f / --fasta <file>`
 
