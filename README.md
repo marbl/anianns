@@ -7,6 +7,7 @@
 
 
 ## About
+Ani Ann's: **Ani** augmented **Ann**otation of satellite arrays.
 
 Ani Ann's is an _a priori_ satellite detection and annotation software. Ani Ann's uses a matrix of Average Nucleotide Identity (Ani) values created by [ModDotPlot](https://github.com/marbl/ModDotPlot) to infer the location and type of satellites. 
 
@@ -36,12 +37,12 @@ python -m pip install .
 
 Currently, use of Ani Ann's is limited to detecting satellites and masking these regions. Classification of satellites, detection of Higher Order Repeats, and other metrics are not yet included. 
 
-Ani Ann's can be run with the flags `annotate` or `mask`:
+Ani Ann's can be run with `python src/anianns/anianns.py`, or simply with the shortcut `annotate`:
 
-`annotate/mask -h`
+`annotate -h`
 
 ```
-Ani Ann's: **Ani** augmented **Ann**otation of satellite arrays
+Ani Ann's: Ani augmented Annotation of satellite arrays
 
 options:
   -h, --help            show this help message and exit
