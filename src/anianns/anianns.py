@@ -72,6 +72,11 @@ def get_parser():
         action="store_true",
         help="Create a masked fasta file."
     )
+    parser.add_argument(
+        "--bed",
+        default="anianns",
+        help="Name of output bed file."
+    )
     return parser
 
 def main():
@@ -126,14 +131,15 @@ def main():
             for (x, y), count in merged_result:
                 x_coord = int((j*1000000*args.band) + x)
                 y_coord = int((j*1000000*args.band) + y)
-                print(f"({x_coord}, {y_coord}): {count}")
+                #print(f"({x_coord}, {y_coord}): {count}")
                 bed_coordinates.append((seq_list[0],x_coord,y_coord))
-    create_bed_file(bed_coordinates, "anianns.bed")
+    bed_name = args.bed + ".bed"
+    create_bed_file(bed_coordinates, bed_name)
 
     if args.mask:
         for i in args.fasta:
             masked_fasta_name = f"{i}".split(".")[0] + "_masked.fa"
-            mask_fasta_with_bed(i,"tmp.bed",masked_fasta_name)
+            mask_fasta_with_bed(i,bed_name,masked_fasta_name)
 
 if __name__ == "__main__":
     main()
