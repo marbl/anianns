@@ -16,7 +16,7 @@ Note that Ani Ann's is currently under active development, and not all features 
 ## Installation
 
 ```
-git clone [https://github.com/marbl/anianns.git](https://github.com/marbl/anianns.git)
+git clone https://github.com/marbl/anianns.git
 cd anianns
 ```
 
@@ -37,7 +37,7 @@ python -m pip install .
 
 Currently, use of Ani Ann's is limited to detecting satellites and masking these regions. Classification of satellites, detection of Higher Order Repeats, and other metrics are not yet included. 
 
-Ani Ann's can be run with `python src/anianns/anianns.py`, or simply with the shortcut `annotate`:
+Ani Ann's can be run with `python -m anianns -h`, or simply with the shortcut `annotate`:
 
 `annotate -h`
 
@@ -47,7 +47,7 @@ Ani Ann's: Ani augmented Annotation of satellite arrays
 options:
   -h, --help            show this help message and exit
   -f FASTA [FASTA ...], --fasta FASTA [FASTA ...]
-                        Path to input fasta file(s).
+                        REQUIRED. Path to input fasta file(s).
   -b BAND, --band BAND  Max height in Mbp of band. (default: 8.0)
   -k KMER, --kmer KMER  k-mer length (default: 21)
   --overlap OVERLAP     Percent overlap. Must be < 0.5. (default: 0.1)
