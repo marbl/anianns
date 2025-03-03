@@ -16,8 +16,8 @@ Note that Ani Ann's is currently under active development, and not all features 
 ## Installation
 
 ```
-git clone https://github.com/marbl/ModDotPlot.git
-cd ModDotPlot
+git clone [https://github.com/marbl/anianns.git](https://github.com/marbl/anianns.git)
+cd anianns
 ```
 
 Although optional, setting up a virtual environment is recommended:
