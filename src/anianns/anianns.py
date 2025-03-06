@@ -126,6 +126,8 @@ def main():
     if not args.bed:
         timestamp = datetime.now().strftime("%Y%m%d")
         bed_name = f"anianns_{timestamp}.bed"
+    else:
+        bed_name = args.bed
     bed_coordinates = []
     print(f"Writing annotations to {os.path.join(args.output_dir,bed_name)}:\n")
 
