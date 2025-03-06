@@ -6,6 +6,7 @@ import mmh3
 
 tab_b = bytes.maketrans(b"ACTG", b"TGAC")
 
+
 def printProgressBar(
     iteration,
     total,
@@ -24,7 +25,10 @@ def printProgressBar(
     if iteration == total:
         print()
 
-def readKmersFromFileNonHashed(filename: str, ksize: int, quiet: bool) -> List[List[int]]:
+
+def readKmersFromFileNonHashed(
+    filename: str, ksize: int, quiet: bool
+) -> List[List[int]]:
     """
     Given a filename and an integer k, returns a list of all k-mers found in the sequences in the file.
     """
@@ -34,14 +38,19 @@ def readKmersFromFileNonHashed(filename: str, ksize: int, quiet: bool) -> List[L
     for seq_id in seq.references:
         print(f"Retrieving k-mers from {seq_id}.... \n")
         kmers_for_seq = []
-        for kmer_hash in generateKmersFromFastaNonHashed(seq.fetch(seq_id), ksize, quiet):
+        for kmer_hash in generateKmersFromFastaNonHashed(
+            seq.fetch(seq_id), ksize, quiet
+        ):
             kmers_for_seq.append(kmer_hash)
         all_kmers.append(kmers_for_seq)
         print(f"\n{seq_id} k-mers retrieved! \n")
 
     return all_kmers
 
-def generateKmersFromFastaNonHashed(seq: Sequence[str], k: int, quiet: bool) -> Iterable[int]:
+
+def generateKmersFromFastaNonHashed(
+    seq: Sequence[str], k: int, quiet: bool
+) -> Iterable[int]:
     n = len(seq)
     if not quiet:
         progress_thresholds = round(n / 77)
@@ -66,7 +75,10 @@ def generateKmersFromFastaNonHashed(seq: Sequence[str], k: int, quiet: bool) -> 
 
         yield kmer
 
-def readSequenceKmersFromFile(filename: str, seqid: str, ksize: int, quiet: bool) -> List[List[int]]:
+
+def readSequenceKmersFromFile(
+    filename: str, seqid: str, ksize: int, quiet: bool
+) -> List[List[int]]:
     """
     Given a filename and an integer k, returns a list of all k-mers found in the sequences in the file.
     """

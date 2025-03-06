@@ -2,6 +2,7 @@ import numpy as np
 import pysam
 from pybedtools import BedTool
 
+
 def row_non_zero_stats(matrix):
     # Set diagonal elements to zero
     np.fill_diagonal(matrix, 0)
@@ -14,14 +15,24 @@ def row_non_zero_stats(matrix):
 
     return non_zero_counts, non_zero_sums
 
-def save_to_file(non_zero_counts, non_zero_sums, window_size, final, j, band, filename="non_zero_stats.csv"):
-    with open(filename, 'w') as f:
-        print(len(non_zero_counts),len(non_zero_sums))
+
+def save_to_file(
+    non_zero_counts,
+    non_zero_sums,
+    window_size,
+    final,
+    j,
+    band,
+    filename="non_zero_stats.csv",
+):
+    with open(filename, "w") as f:
+        print(len(non_zero_counts), len(non_zero_sums))
         for i in range(len(non_zero_counts)):
             start = (i * window_size) + (j * band)
-            end = min((start + window_size),final)
+            end = min((start + window_size), final)
             f.write(f"{start}-{end}, {non_zero_counts[i]}, {non_zero_sums[i]} \n")
         f.close()
+
 
 def find_non_zero_length(matrix, window):
     n = matrix.shape[0]
@@ -62,9 +73,10 @@ def find_non_zero_length(matrix, window):
                 break
 
         lengths.append(count)
-        coords.append((start_range*window, end_range*window))
+        coords.append((start_range * window, end_range * window))
 
     return lengths, coords
+
 
 def merge_coordinates(data):
     """
@@ -78,7 +90,7 @@ def merge_coordinates(data):
     """
     # Filter out entries with count <= 3
     filtered_data = [(key, count) for key, count in data.items() if count > 3]
-    
+
     # Sort by y coordinate, then by count (descending)
     filtered_data.sort(key=lambda item: (item[0][1], -item[1]))
 
@@ -91,7 +103,9 @@ def merge_coordinates(data):
             seen_y.add(y)
 
     # Now process for x axis
-    result.sort(key=lambda item: (item[0][0], -item[1]))  # Sort by x, then by count (descending)
+    result.sort(
+        key=lambda item: (item[0][0], -item[1])
+    )  # Sort by x, then by count (descending)
     final_result = []
     seen_x = set()
     for (x, y), count in result:
@@ -104,33 +118,37 @@ def merge_coordinates(data):
     final_result.sort(key=lambda item: item[0][0])
     return final_result
 
+
 def mask_diagonals(matrix, coordinates):
     x = 0
     for i in range(matrix.shape[0]):  # Use an index to iterate over rows
         start = int(coordinates[x][0])
         end = int(coordinates[x][1])
-        matrix[i, start:end + 1] = 0  # Mask the specified range in the row
+        matrix[i, start : end + 1] = 0  # Mask the specified range in the row
         x += 1
     return matrix
+
 
 def mask_offdiagonals(matrix, coordinates):
     for i in range(matrix.shape[0]):  # Iterate over indices, not rows directly
         start = int(coordinates[i][0])  # Get start of the range
         end = int(coordinates[i][1])  # Get end of the range
-        
+
         # Set all elements before `start` to 0
         matrix[i, 0:start] = 0
-        
+
         # Set all elements after `end` to 0
-        matrix[i, end + 1:matrix.shape[1]] = 0
-        
+        matrix[i, end + 1 : matrix.shape[1]] = 0
+
     return matrix
+
 
 def create_bed_file(intervals, bed_filename):
     with open(bed_filename, "a") as bed_file:
         for interval in intervals:
             chr, start, end = interval
             bed_file.write(f"{chr}\t{start}\t{end}\n")
+
 
 def mask_fasta_with_bed(fasta_file, seq_name, bed_file, output_fasta):
     # Load the BED file
@@ -151,13 +169,13 @@ def mask_fasta_with_bed(fasta_file, seq_name, bed_file, output_fasta):
                 start, end = int(interval.start), int(interval.end)
                 # Replace the region with 'N'
                 for i in range(start, end):
-                    sequence[i] = 'N'
+                    sequence[i] = "N"
 
             # Write the masked sequence to the output file
             masked_sequence = "".join(sequence)
             out_fasta.write(f">{seq_name}\n")
             # Split the sequence into lines of 60 characters for FASTA formatting
             for i in range(0, len(masked_sequence), 60):
-                out_fasta.write(masked_sequence[i:i+60] + "\n")
+                out_fasta.write(masked_sequence[i : i + 60] + "\n")
 
     print(f"Masked FASTA file written to {output_fasta}")
