@@ -1,4 +1,5 @@
 from typing import Iterable, List, Sequence
+from moddotplot.parse_fasta import generateKmersFromFasta
 import pysam
 import sys
 import mmh3
@@ -64,3 +65,19 @@ def generateKmersFromFastaNonHashed(seq: Sequence[str], k: int, quiet: bool) -> 
         kmer = seq[i : i + k].upper()
 
         yield kmer
+
+def readSequenceKmersFromFile(filename: str, seqid: str, ksize: int, quiet: bool) -> List[List[int]]:
+    """
+    Given a filename and an integer k, returns a list of all k-mers found in the sequences in the file.
+    """
+    all_kmers = []
+    seq = pysam.FastaFile(filename)
+
+    print(f"Retrieving k-mers from {seqid}.... \n")
+    kmers_for_seq = []
+    for kmer_hash in generateKmersFromFasta(seq.fetch(seqid), ksize, quiet):
+        kmers_for_seq.append(kmer_hash)
+    all_kmers.append(kmers_for_seq)
+    print(f"\n{seqid} k-mers retrieved! \n")
+
+    return all_kmers

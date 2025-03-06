@@ -127,12 +127,12 @@ def mask_offdiagonals(matrix, coordinates):
     return matrix
 
 def create_bed_file(intervals, bed_filename):
-    with open(bed_filename, "w") as bed_file:
+    with open(bed_filename, "a") as bed_file:
         for interval in intervals:
             chr, start, end = interval
             bed_file.write(f"{chr}\t{start}\t{end}\n")
 
-def mask_fasta_with_bed(fasta_file, bed_file, output_fasta):
+def mask_fasta_with_bed(fasta_file, seq_name, bed_file, output_fasta):
     # Load the BED file
     bed = BedTool(bed_file)
 
@@ -141,9 +141,10 @@ def mask_fasta_with_bed(fasta_file, bed_file, output_fasta):
 
     # Prepare the output file
     with open(output_fasta, "w") as out_fasta:
-        for seq_name in fasta.references:
+        for seq in seq_name:
+            print(seq)
             # Get the original sequence
-            sequence = list(fasta.fetch(seq_name))
+            sequence = list(fasta.fetch(seq))
 
             # Filter BED entries for the current sequence
             for interval in bed.filter(lambda x: x.chrom == seq_name):

@@ -1,15 +1,14 @@
 #!/usr/bin/env python3
-import sys
 import argparse
 import math
-import json
 import os
 import numpy as np
 from moddotplot.parse_fasta import readKmersFromFile, getInputHeaders, isValidFasta
 from moddotplot.estimate_identity import createSelfMatrix
-from anianns.parse_input import readKmersFromFileNonHashed
+from anianns.parse_input import readKmersFromFileNonHashed, readSequenceKmersFromFile
 from anianns.parse_dotplot import mask_fasta_with_bed, row_non_zero_stats, save_to_file, find_non_zero_length, mask_offdiagonals, mask_diagonals, merge_coordinates, create_bed_file
 from collections import Counter
+from datetime import datetime
 
 def get_parser():
     """
@@ -74,8 +73,8 @@ def get_parser():
     )
     parser.add_argument(
         "--bed",
-        default="anianns",
-        help="Name of output bed file."
+        default=None,
+        help="Name of output bed file. Default is anianns_YYYYMMDD.bed"
     )
     return parser
 
@@ -91,20 +90,30 @@ def main():
     print(ASCII_ART)
     # -----------INPUT SEQUENCE VALIDATION-----------
     seq_list = []
+    fasta_list = args.fasta.copy()
     for i in args.fasta:
-        isValidFasta(i)
-        headers = getInputHeaders(i)
-        if len(headers) > 1:
-            print(f"File {i} contains multiple fasta entries. \n")
-            counter = 1
-            for j in headers:
-                counter += 1
-        for j in headers:
-            seq_list.append(j)
-    if len(seq_list) > 1:
-        print(f"Annotating the following sequences: {seq_list}. \n")
+        try:
+            isValidFasta(i)
+            headers = getInputHeaders(i)
+
+            if len(headers) > 1:
+                print(f"File {i} contains multiple fasta entries.\n")
+
+            seq_list.append((headers,i))  # Add all headers to seq_list
+
+        except Exception as e:
+            print(
+                f"\nUnable to open {i}. Please check it is correctly formatted or compressed...\n"
+            )
+            fasta_list.remove(i)
+
+    unique_sequences = [x[0] for x in seq_list]
+    flattened_unique_sequences =  [item for sublist in unique_sequences for item in sublist]
+
+    if len(flattened_unique_sequences) > 1:
+        print(f"Annotating the following sequences: {flattened_unique_sequences}. \n")
     else:
-        print(f"Annotating {seq_list[0]}: \n")
+        print(f"Annotating {flattened_unique_sequences}: \n")
 
     # -----------CREATE PATH IF NOT GIVEN------------
     if not args.output_dir:
@@ -113,33 +122,43 @@ def main():
         os.makedirs(args.output_dir)
 
     # -----------Run Ani Ann's on sequences-----------
+    
+    if not args.bed:
+        timestamp = datetime.now().strftime("%Y%m%d")
+        bed_name = f"anianns_{timestamp}.bed"
     bed_coordinates = []
-    for i in args.fasta:
-        # Initialize bed file db
-        k = readKmersFromFile(i, args.kmer, False)
-        genome_length = len(k[0])
-        divisor = math.ceil(genome_length/(args.band * 1000000))
-        for j in range(0,divisor):
-            start = int(j*1000000*args.band)
-            end = int(min(start + (1000000 * args.band), genome_length))
-            print(f"Creating a sub-matrix ({j+1}/{divisor}) of {seq_list[0]} from {start} to {end}: \n")
-            submatrix = createSelfMatrix(len(k[0][start:end]),k[0][start:end],args.window,8,0.5,21,args.identity,False,500)
-            nonzerodata = find_non_zero_length(submatrix,args.window)
+    print(f"Writing annotations to {os.path.join(args.output_dir,bed_name)}:\n")
 
-            tuple_counts = Counter(nonzerodata[1])
-            merged_result = merge_coordinates(tuple_counts)
-            for (x, y), count in merged_result:
-                x_coord = int((j*1000000*args.band) + x)
-                y_coord = int((j*1000000*args.band) + y)
-                #print(f"({x_coord}, {y_coord}): {count}")
-                bed_coordinates.append((seq_list[0],x_coord,y_coord))
-    bed_name = args.bed + ".bed"
-    create_bed_file(bed_coordinates, bed_name)
+    for fasta_file in seq_list:
+        fasta_name = fasta_file[1]
+        for sequence in fasta_file[0]:
+            # Initialize bed file db. i[1] = fa file, i[0] = seq header
+            k = readSequenceKmersFromFile(fasta_name, sequence, args.kmer, False)
+            genome_length = len(k[0])
+            divisor = math.ceil(genome_length/(args.band * 1000000))
+            for j in range(0,divisor):
+                start = int(j*1000000*args.band)
+                end = int(min(start + (1000000 * args.band), genome_length))
+                print(f"Annotating {sequence} from {start} to {end} ({j+1}/{divisor}): \n")
+                submatrix = createSelfMatrix(len(k[0][start:end]),k[0][start:end],args.window,8,0.5,21,args.identity,False,500)
+                nonzerodata = find_non_zero_length(submatrix,args.window)
+
+                tuple_counts = Counter(nonzerodata[1])
+                merged_result = merge_coordinates(tuple_counts)
+                bed_coordinates = []
+                for (x, y), count in merged_result:
+                    x_coord = int((j*1000000*args.band) + x)
+                    y_coord = int((j*1000000*args.band) + y)
+                    bed_coordinates.append((sequence,x_coord,y_coord))
+                create_bed_file(bed_coordinates, bed_name)
+            print(f"Finished annotating {i}!\n")
 
     if args.mask:
-        for i in args.fasta:
-            masked_fasta_name = f"{i}".split(".")[0] + "_masked.fa"
-            mask_fasta_with_bed(i,bed_name,masked_fasta_name)
+        for fasta_file in seq_list:
+            fasta_name = fasta_file[1]
+            masked_fasta_name = f"{fasta_name}".split(".")[0] + "_masked.fa"
+            print(masked_fasta_name)
+            mask_fasta_with_bed(fasta_name,fasta_file[0],bed_name,masked_fasta_name)
 
 if __name__ == "__main__":
     main()

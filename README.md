@@ -37,9 +37,9 @@ python -m pip install .
 
 Currently, use of Ani Ann's is limited to detecting satellites and masking these regions. Classification of satellites, detection of Higher Order Repeats, and other metrics are not yet included. 
 
-Ani Ann's can be run with `python -m anianns -h`, or simply with the shortcut `annotate`:
+Ani Ann's can be run with `python -m anianns -h`, or simply with the shortcut `anianns`:
 
-`annotate -h`
+`anianns -h`
 
 ```
 Ani Ann's: Ani augmented Annotation of satellite arrays
@@ -58,7 +58,7 @@ options:
                         Window size of ModDotPlot. (default: 2000)
   -m, --mask            Create a masked fasta file. (default: False)
 ```
-To both run repeat masker and annotation tools, simply run `annotate -m/--mask.`
+To both run repeat masker and annotation tools, simply run `anianns -m/--mask.`
 
 `-f / --fasta <file>`
 
