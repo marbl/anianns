@@ -4,21 +4,20 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "anianns"
-version = "0.1.1"
+version = "0.3.0"
 description = "A Python package for annotating CenSat genomic regions"
 authors = [
     { name="Alex Sweeten", email="alex.sweeten@nih.gov" }
 ]
 readme = "README.md"
 license = { file = "LICENSE" }
-keywords = ["genomics", "bioinformatics"]
+keywords = ["genomics", "bioinformatics", "repeatmasker"]
 classifiers = [
     "Programming Language :: Python :: 3",
     "License :: OSI Approved :: MIT License"
 ]
 dependencies = [
     "pyGenomeTracks",
-    "pysam",
     "moddotplot"
 ]
 [project.scripts]

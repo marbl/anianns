@@ -145,9 +145,10 @@ def mask_offdiagonals(matrix, coordinates):
 
 def create_bed_file(intervals, bed_filename):
     with open(bed_filename, "a") as bed_file:
+        bed_file.write(f'track name="{bed_filename}" visibility=2 itemRgb="On"\n')
         for interval in intervals:
-            chr, start, end = interval
-            bed_file.write(f"{chr}\t{start}\t{end}\n")
+            chrom, chromStart, chromEnd, name, score, strand, thickStart, thickEnd, itemRgb = interval
+            bed_file.write(f"{chrom}\t{chromStart}\t{chromEnd}\t{name}\t{score}\t{strand}\t{thickStart}\t{thickEnd}\t{itemRgb}\n")
 
 
 def mask_fasta_with_bed(fasta_file, seq_name, bed_file, output_fasta):
