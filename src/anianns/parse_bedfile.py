@@ -93,7 +93,6 @@ def find_files_with_suffix(directory: str, suffix: str):
 
 def classify_seq(fasta_file, bed_file, k, sat_directory):
     annotation_entries = read_bedfile(bed_file)
-
     # Load k-mer database
     sat_db = {}
     print(f"Loading satellite db\n")
@@ -117,12 +116,21 @@ def classify_seq(fasta_file, bed_file, k, sat_directory):
         lengths = [(key, len(query_set & value)) for key, value in sat_db.items()]
         # Sort by length in descending order
         lengths.sort(key=lambda x: x[1], reverse=True)
-
-        # Check if the largest value is at least 3x the second largest
-        if len(lengths) > 1 and lengths[0][1] >= 3 * lengths[1][1]:
+        hor_kmers2 = generateKmersFromFastaForward(seq, 6, True)
+        hor_list2 = list(islice(hor_kmers2, 1, size))
+        x2 = top_n_frequent_distances(calculate_distances(hor_list2),4)
+        #print(x2)
+        try:
+            containment = lengths[0][1]/len(query_set)
+            print(chromStart,chromEnd,containment)
+        except ZeroDivisionError:
+            containment = 0
+            print(lengths[0][0])
+        #print(containment)
+        if containment >= 0.009:
             result = lengths[0][0]
         # Check if Higher Order Repeat
-        if result == "other":
+        if result == "other" or result == "metis":
             hor_kmers = generateKmersFromFastaForward(seq, 6, True)
             hor_list = list(islice(hor_kmers, 1, size))
             x = top_n_frequent_distances(calculate_distances(hor_list),4)
@@ -132,9 +140,7 @@ def classify_seq(fasta_file, bed_file, k, sat_directory):
     with open(bed_file, "w") as bedfile:
         for entry2 in new_annotations:
         # Assuming entry is a tuple or list and you want to join the parts with tabs
-            
             bedfile.write(entry2)
-
     print(f"Satellites annotated in {bed_file}!\n")
 
 

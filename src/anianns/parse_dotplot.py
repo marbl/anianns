@@ -1,7 +1,7 @@
 import numpy as np
 import pysam
 from pybedtools import BedTool
-
+import os
 
 def row_non_zero_stats(matrix):
     # Set diagonal elements to zero
@@ -144,8 +144,10 @@ def mask_offdiagonals(matrix, coordinates):
 
 
 def create_bed_file(intervals, bed_filename):
+    bed_dir = os.path.dirname(bed_filename)
+    if not os.path.exists(bed_dir):
+        os.makedirs(bed_dir)
     with open(bed_filename, "a") as bed_file:
-        bed_file.write(f'track name="{bed_filename}" visibility=2 itemRgb="On"\n')
         for interval in intervals:
             chrom, chromStart, chromEnd, name, score, strand, thickStart, thickEnd, itemRgb = interval
             bed_file.write(f"{chrom}\t{chromStart}\t{chromEnd}\t{name}\t{score}\t{strand}\t{thickStart}\t{thickEnd}\t{itemRgb}\n")

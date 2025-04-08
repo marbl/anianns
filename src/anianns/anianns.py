@@ -69,6 +69,10 @@ def get_parser():
         default=None,
         help="Name of output bed file. Default is anianns_YYYYMMDD.bed",
     )
+    parser.add_argument(
+            "--name",
+            default=None,
+        )
     return parser
 
 
@@ -122,6 +126,7 @@ def main():
             if len(seq_bed_list) < 1:
                 print(f"Not found in fasta file. Double check that names match up.")
             for thing in seq_bed_list:
+                print("Test")
                 print(thing[1],thing[2])
                 classify_seq(thing[1],thing[2],args.kmer,sat_db)
             sys.exit(0)
@@ -167,12 +172,11 @@ def main():
             os.makedirs(args.output_dir)
 
         # -----------Run Ani Ann's on sequences-----------
-
-        if not args.bed:
+        if not args.name:
             timestamp = datetime.now().strftime("%Y%m%d")
             bed_name = f"anianns_{timestamp}.bed"
         else:
-            bed_name = args.bed
+            bed_name=args.name
         bed_coordinates = []
         print(f"Writing annotations to {os.path.join(args.output_dir,bed_name)}:\n")
 
@@ -206,7 +210,7 @@ def main():
                     merged_result = merge_coordinates(tuple_counts)
                     bed_coordinates = []
                     for (x, y), count in merged_result:
-                        x_coord = int((j * 1000000 * args.band) + x)
+                        x_coord = int((j * 1000000 * args.band) + x + 1)
                         y_coord = int((j * 1000000 * args.band) + y)
                         bed_coordinates.append((sequence, x_coord, y_coord, 'censat', 0, ".", x_coord, y_coord, COLOR_MAPPING["other"]))
                     create_bed_file(bed_coordinates, bed_name)

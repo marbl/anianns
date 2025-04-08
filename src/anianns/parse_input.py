@@ -231,6 +231,7 @@ def extract_region(fasta_file, chr, region_start, region_end):
         sequence = fasta.fetch(chr, region_start - 1, region_end)
     except:
         print(f"Unable to find {chr}. Make sure name is fasta file = name in index or bed file.\n")
+        sequence = None
 
     # Close FASTA file
     fasta.close()
@@ -247,7 +248,7 @@ def read_bedfile(filepath):
             parts = line.split("\t")  # Avoids unnecessary .strip() as split() handles it
             #chrom, coords = parts[0].split(":")
             #start, end = map(int, coords.split("-"))
-            append((parts[0], int(parts[1])+1, int(parts[2]), parts[3], int(parts[4]), parts[5], int(parts[6])+1, int(parts[7]), parts[8].split("\n")[0]))  # Direct conversion
+            append((parts[0], int(parts[1]), int(parts[2]), parts[3], int(parts[4]), parts[5], int(parts[6]), int(parts[7]), parts[8].split("\n")[0]))  # Direct conversion
     return bed_data
 
 def minhash_sketch(hash_list, s=10_000):
