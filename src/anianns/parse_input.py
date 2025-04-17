@@ -242,7 +242,7 @@ def read_bedfile(filepath):
     """Efficiently reads a BED-like file and returns parsed data as a list of tuples."""
     bed_data = []
     with open(filepath, "r") as f:
-        next(f)
+        #next(f)
         append = bed_data.append  # Local variable reference for faster access
         for line in f:
             parts = line.split("\t")  # Avoids unnecessary .strip() as split() handles it
