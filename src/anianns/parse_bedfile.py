@@ -100,7 +100,7 @@ def classify_seq(fasta_file, bed_file, k, sat_directory):
         sat = load_kmers_binary(satellite)
         #sat_db.append(sat)
         for key in sat:
-            sat_db[key] = minhash_sketch(sat[key], s=100000)
+            sat_db[key] = sat[key]
             #sat_db[key] = sat[key]
     print(f"Satellites loaded! Annotating satellite regions...\n")
     new_annotations = []
@@ -122,12 +122,13 @@ def classify_seq(fasta_file, bed_file, k, sat_directory):
         #print(x2)
         try:
             containment = lengths[0][1]/len(query_set)
-            print(chromStart,chromEnd,containment)
+            #print(chromStart,chromEnd,containment)
+            #print(x2)
         except ZeroDivisionError:
             containment = 0
-            print(lengths[0][0])
+            #print(lengths[0][0])
         #print(containment)
-        if containment >= 0.009:
+        if containment >= 0.10:
             result = lengths[0][0]
         # Check if Higher Order Repeat
         if result == "other" or result == "metis":
@@ -137,6 +138,7 @@ def classify_seq(fasta_file, bed_file, k, sat_directory):
             result = classify_hor(x)
             # Write to file
         new_annotations.append(f"{chrom}\t{chromStart}\t{chromEnd}\t{result}\t{score}\t{strand}\t{thickStart}\t{thickEnd}\t{get_color(result)}\n")
+        #print(result, x2, chromStart, chromEnd, containment)
     with open(bed_file, "w") as bedfile:
         for entry2 in new_annotations:
         # Assuming entry is a tuple or list and you want to join the parts with tabs

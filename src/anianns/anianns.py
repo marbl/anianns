@@ -41,7 +41,7 @@ def get_parser():
         nargs="+",
     )
     parser.add_argument(
-        "--band", type=float, default=8.0, help="Max height in Mbp of band."
+        "--band", type=float, default=4.0, help="Max height in Mbp of band."
     )
     parser.add_argument("-k", "--kmer", default=21, help="k-mer length")
     parser.add_argument(
@@ -122,12 +122,10 @@ def main():
                     )
                 fasta_list.remove(i)
             sat_db = find_files_with_suffix(args.classify,".bin")
-            print("Finsihed sats")
+            print(f"Found satellite database files at {args.classify}\n")
             if len(seq_bed_list) < 1:
                 print(f"Not found in fasta file. Double check that names match up.")
             for thing in seq_bed_list:
-                print("Test")
-                print(thing[1],thing[2])
                 classify_seq(thing[1],thing[2],args.kmer,sat_db)
             sys.exit(0)
         # Make sure the matching fasta file is included in order to get orientation

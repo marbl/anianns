@@ -145,7 +145,7 @@ def mask_offdiagonals(matrix, coordinates):
 
 def create_bed_file(intervals, bed_filename):
     bed_dir = os.path.dirname(bed_filename)
-    if not os.path.exists(bed_dir):
+    if bed_dir and not os.path.exists(bed_dir):  # Ensure bed_dir is not empty
         os.makedirs(bed_dir)
     with open(bed_filename, "a") as bed_file:
         for interval in intervals:
