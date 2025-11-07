@@ -4,14 +4,14 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "anianns"
-version = "0.1.1"
-description = "A Python package for annotating CenSat genomic regions"
+version = "0.5.0"
+description = "A Python package for annotating large tandem repeats"
 authors = [
     { name="Alex Sweeten", email="alex.sweeten@nih.gov" }
 ]
 readme = "README.md"
 license = { file = "LICENSE" }
-keywords = ["genomics", "bioinformatics"]
+keywords = ["genomics", "bioinformatics", "repeatmasker", "tandem repeat"]
 classifiers = [
     "Programming Language :: Python :: 3",
     "License :: OSI Approved :: MIT License"
@@ -19,7 +19,15 @@ classifiers = [
 dependencies = [
     "pyGenomeTracks",
     "pysam",
-    "moddotplot"
+    "setproctitle",
+    "numpy",
+    "polars",
+    "mmh3",
+    "numba",
 ]
+[project.optional-dependencies]
+moddotplot = ["moddotplot"]
+dev = ["black", "jupyter", "ipykernel", "pytest", "biopython"]
 [project.scripts]
 anianns = "anianns.__main__:main"
+anianns_kmer_db = "anianns.build_kmer_db:main"
