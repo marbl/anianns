@@ -222,8 +222,6 @@ Suppress all logging output. **Default: False.**
 
 Here, we will create a db of known satellite arrays using the HG002 human genome CenSat annotation track ([credit: Hailey Loucks](https://github.com/hloucks/CenSatData/tree/main)):
 
-``
-
 `wget https://raw.githubusercontent.com/hloucks/CenSatData/refs/heads/main/HG002/v1.1/hg002v1.1.cenSatv2.0.bed`
 
 We want to remove any centromere transition regions `ct` from this BED file:
