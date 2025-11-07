@@ -64,11 +64,13 @@ def detect_precise_boundaries(fasta_file, seq_id, seq_len, window, k, coordinate
     )
 
     if not core_seq:
-        print(f"Unable to get boundary for {core_start}-{core_end}\n")
+        if verbose:
+            print(f"Unable to get boundary for {core_start}-{core_end}\n")
         return None
     
     if not left_boundary or not right_boundary:
-        print(f"Error getting boundaries for {core_start}-{core_end}\n")
+        if verbose:
+            print(f"Error getting boundaries for {core_start}-{core_end}\n")
         return None
 
     if classify:
@@ -80,7 +82,8 @@ def detect_precise_boundaries(fasta_file, seq_id, seq_len, window, k, coordinate
             region_end=right_boundary
         )
         if not array_seq:
-            print(f"Unable to get boundary for {coordinates}\n")
+            if verbose:
+                print(f"Unable to get boundary for {coordinates}\n")
             return None
         
         array_kmers = generate_kmers_from_fasta(array_seq, k, True)
@@ -494,7 +497,8 @@ def report_borders(fa, seq_id, seq_len, band, offset, window, k, df: pl.DataFram
                 new_ends.append(updated_boundaries[1])
                 classification.append(updated_boundaries[2])
             except Exception as e:
-                print(f"Error occurred while updating boundaries: {e}")
+                if verbose:
+                    print(f"Error occurred while updating boundaries: {e}")
             # Do not increment i, as the next region is now at the same index
 
         else:
@@ -510,7 +514,8 @@ def report_borders(fa, seq_id, seq_len, band, offset, window, k, df: pl.DataFram
                     new_ends.append(updated_boundaries[1])
                     classification.append(updated_boundaries[2])
                 except Exception as e:
-                    print(f"Error occurred while updating boundaries: {e}")
+                    if verbose:
+                        print(f"Error occurred while updating boundaries: {e}")
             else:
                 coordinates = (int(starts[i]), int(ends[i]))
                 updated_boundaries = detect_precise_boundaries(fa, seq_id, seq_len, window, k, coordinates, verbose, supersets_dict)

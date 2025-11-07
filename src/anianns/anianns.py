@@ -624,17 +624,31 @@ def main():
                             print(tuple_of_lists)
 
                     # Replace the columns in df1
-                    df2 = pl.DataFrame({
-                        "chrom": [seq_id] * len(new_starts),
-                        "start": new_starts,
-                        "end": new_ends,
-                        "name": new_names,
-                        "score": [0] * len(new_starts),
-                        "strand": ["."] * len(new_starts),
-                        "thickStart": new_starts,
-                        "thickEnd": new_ends,
-                        "itemRgb": ["0,0,0"] * len(new_starts)
-                    })
+                    if seq_bounds:
+                        offset = int(seq_bounds[1])
+                        df2 = pl.DataFrame({
+                            "#chrom": [seq_id] * len(new_starts),
+                            "start": [s + offset for s in new_starts],
+                            "end": [e + offset for e in new_ends],
+                            "name": new_names,
+                            "score": [0] * len(new_starts),
+                            "strand": ["."] * len(new_starts),
+                            "thickStart": [s + offset for s in new_starts],
+                            "thickEnd": [e + offset for e in new_ends],
+                            "itemRgb": ["0,0,0"] * len(new_starts)
+                        })
+                    else:
+                        df2 = pl.DataFrame({
+                            "#chrom": [seq_id] * len(new_starts),
+                            "start": new_starts,
+                            "end": new_ends,
+                            "name": new_names,
+                            "score": [0] * len(new_starts),
+                            "strand": ["."] * len(new_starts),
+                            "thickStart": new_starts,
+                            "thickEnd": new_ends,
+                            "itemRgb": ["0,0,0"] * len(new_starts)
+                        })
 
                     bedfilename = f"{seq_id}.bed"
                     bedfilepath = os.path.join(directory,bedfilename)
