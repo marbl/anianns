@@ -10,6 +10,8 @@ from collections import Counter
 import numpy as np
 import re
 import matplotlib.pyplot as plt
+import seaborn as sns
+import csv 
 
 from anianns.kmer_utils import (
     generate_kmers_from_fasta,
@@ -310,6 +312,42 @@ def get_input_headers(filename: List) -> List:
 
     return header_list
 
+def merge_close_values(pairs, tolerance=1):
+    # sort by value first for correct merging
+    pairs = sorted(pairs, key=lambda x: x[0])
+
+    merged = []
+
+    for value, count in pairs:
+        if not merged:
+            merged.append({
+                "values": [(value, count)],
+                "total_count": count,
+                "rep_value": value
+            })
+            continue
+
+        last = merged[-1]
+
+        if abs(last["rep_value"] - value) <= tolerance:
+            last["values"].append((value, count))
+            last["total_count"] += count
+            last["rep_value"] = max(
+                last["values"], key=lambda x: x[1]
+            )[0]
+        else:
+            merged.append({
+                "values": [(value, count)],
+                "total_count": count,
+                "rep_value": value
+            })
+
+    # 🔑 sort final output by total_count (descending)
+    result = [(g["rep_value"], g["total_count"]) for g in merged]
+    result.sort(key=lambda x: x[1], reverse=True)
+
+    return result
+
 def plot_matrix(matrix, title="Matrix Plot", cmap="gray_r", show_colorbar=True):
     if not isinstance(matrix, np.ndarray):
         raise TypeError("Input must be a NumPy array")
@@ -389,3 +427,53 @@ def validate_json(path: str, required_keys: list = None) -> bool:
             return False
 
     return True
+
+def write_summary_file(tuple_of_lists, out_csv_path: str) -> None:
+    new_starts, new_ends, new_names, monomer, periodicity, hor = tuple_of_lists
+
+    # Basic sanity check
+    n = len(new_starts)
+    if not (len(new_ends) == len(new_names) == len(monomer) == len(periodicity) == len(hor) == n):
+        raise ValueError("All lists in tuple_of_lists must have the same length.")
+
+    # Group intervals by name, but treat None as unique per entry
+    groups = {}  # key -> dict
+    none_counter = 0
+
+    for s, e, name, m, p, h in zip(new_starts, new_ends, new_names, monomer, periodicity, hor):
+        if name is None or name is "Unknown":
+            none_counter += 1
+            key = f"None_{none_counter}"  # unique row per None
+            out_name = "Unclassified Repeat"
+        else:
+            key = name
+            out_name = name
+
+        if key not in groups:
+            groups[key] = {
+                "name": out_name,
+                "monomer": m,
+                "periodicity": p,
+                "hor": h,
+                "intervals": []
+            }
+
+        groups[key]["intervals"].append((s, e))
+
+    # Write CSV
+    with open(out_csv_path, "w", newline="") as f:
+        writer = csv.DictWriter(
+            f,
+            fieldnames=["name", "monomer", "periodicity", "hor", "intervals"]
+        )
+        writer.writeheader()
+
+        for _, row in groups.items():
+            intervals_str = ";".join(f"{s}-{e}" for s, e in row["intervals"])
+            writer.writerow({
+                "name": row["name"],
+                "monomer": row["monomer"],
+                "periodicity": row["periodicity"],
+                "hor": row["hor"],
+                "intervals": intervals_str
+            })

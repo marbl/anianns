@@ -129,7 +129,7 @@ def generate_kmers_from_fasta_forward_only(
                 )
         # Remove case sensitivity
         kmer = seq[i : i + k].upper()
-        fh = kmer
+        fh = mmh3.hash(kmer, seed=42)
 
         yield fh
 

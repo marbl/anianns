@@ -30,6 +30,7 @@ from anianns.general_utils import (
     plot_matrix,
     read_bed_files,
     validate_json,
+    write_summary_file
 )
 
 from anianns.kmer_utils import (
@@ -42,10 +43,14 @@ from anianns.parse_matrix import (
     append_coordinates,
     get_diagonal_span,
     merge_shared_boundaries,
+    sobel_with_diagonal_probes,
+    sobel_spans,
     split_diagonal_attached
 )
 
 from anianns.refine_boundaries import report_borders
+
+from anianns.union_find import sobel, sobel_with_diagonal_probes2, find_offdiag_rectangles
 
 os.environ["KMP_WARNINGS"] = "FALSE"
 
@@ -332,15 +337,14 @@ def main():
         directory     = args.directory or os.getcwd()
 
         if not args.quiet:
-            print(f"Output directory: {directory}")
-            print(f"K-mer length:     {args.kmer}")
-            print(f"Band height:      {band_height} bp")
-            print(f"Window size:      {args.window} bp")
-            print(f"ANI threshold:    {args.identity} %")
-            if args.classify:
-                print(f"K-mer dir:   {args.classify}")
-            else:
-                print(f"K-mer dir:   None provided")
+            label_width = 20
+
+            print(f"{'Output directory:':<{label_width}} {directory}")
+            print(f"{'K-mer length:':<{label_width}} {args.kmer}")
+            print(f"{'Band height:':<{label_width}} {band_height} bp")
+            print(f"{'Window size:':<{label_width}} {args.window} bp")
+            print(f"{'ANI threshold:':<{label_width}} {args.identity} %")
+            print(f"{'K-mer dir:':<{label_width}} {args.classify if args.classify else 'None provided'}")
             print("─" * 65)
 
         # Build list of (fasta, [seq_ids]) pairs
@@ -374,6 +378,7 @@ def main():
             # cache everything into locals
             k_param    = args.kmer
             win        = args.window
+            verbosity  = args.verbose
             build_sets = build_kmer_sets
             imat       = intersection_matrix
             imat_inv   = intersection_matrix_inverted
@@ -425,7 +430,7 @@ def main():
                     M_diag, M_distal = split_diagonal_attached(initial_matrix)
 
                     # Plot here
-                    if args.verbose:
+                    if verbosity:
                         print(f"Partitioning into {n_windows} windows of {band_height} bp each.\n")
                     if n_windows > 1:
                         if not args.quiet:
@@ -438,7 +443,12 @@ def main():
                             print(element, element[1], element[1]*win, element[0][1]-element[0][0])'''
                         
                         # Replace 0 here with start prefix
-                        for coordinates in merge_intv(spans, 0, False):
+                        for coordinates in merge_intv(
+                            intervals = spans, 
+                            prefix = 0, 
+                            window = win,
+                            verbose=verbosity
+                            ):
                                 satellite_coordinate_list.append(coordinates)
                         # Iterate through the remaining windows
                         for w in range(2, n_windows+1):
@@ -455,6 +465,7 @@ def main():
                             ov, nov = build_sets(kmers_list, max_len, win, interval)
                             
                             updated_matrix = imat(ov, nov, k_param)
+                            
 
                             inv = imat_inv(
                                 initial_matrix, updated_matrix,
@@ -463,18 +474,39 @@ def main():
                                 k_param
                             )
                             inv[inv < args.identity] = 0
-
-                            '''plot_matrix(inv)'''
+                            '''sob = sobel_with_diagonal_probes(inv, thresh=0.7, min_thick=1)
+                            sys.exit(0)
+                            print(spans)'''
+                            if args.plot:
+                                plot_matrix(inv)
+                            #sys.exit(0)
+                            #plot_matrix(inv)
+                            #sob = sobel_with_diagonal_probes(inv, thresh=0.7, min_thick=1)
+                            #plot_matrix(sob)
+                            M_diag, M_distal = split_diagonal_attached(inv)
 
                             new_spans = get_span(updated_matrix, win, zero_tol=2)
                             prefix_amount = band_height * (w-1)
                             
-                            '''if args.verbose:
+                            '''if verbosity:
                                 print(f"Current prefix: {prefix_amount}\n")'''
-
-                            for coordinates in merge_intv(new_spans, prefix_amount, False):
+                            for coordinates in merge_intv(
+                                intervals = new_spans, 
+                                prefix = prefix_amount, 
+                                window= win,
+                                verbose = verbosity
+                            ):
                                 satellite_coordinate_list.append(coordinates)
 
+                            if args.verbose:
+                                print(satellite_coordinate_list)
+                                print("-----\n")
+                            '''probes = sobel_with_diagonal_probes(
+                                M = inv,
+                                thresh = 0.7,
+                                min_thick = 1,
+                            )'''
+                            #print(sobel_spans(probes,win))
                             # Roll matrices forward
                             initial_matrix, prev_ov, prev_nov = updated_matrix, ov, nov
 
@@ -485,9 +517,6 @@ def main():
                                 else:
                                     print_progress_bar(w, n_windows, prefix="Progress:", suffix="Complete", length=40)
 
-                            if args.verbose:
-                                print(new_spans)
-
                     else:
                         # No progress bar in this case
                         initial_matrix[initial_matrix < args.identity] = 0
@@ -495,22 +524,33 @@ def main():
 
                         # Get off diagonals here after screening for identity
                         M_diag, M_offdiag = split_diagonal_attached(initial_matrix)
-                        for coordinates in merge_intv(spans, 0, False):
+
+                        for coordinates in merge_intv(
+                            intervals = spans, 
+                            prefix = 0, 
+                            window = win,
+                            verbose = verbosity
+                            ):
+                            # Append only if the counts pass a threshold
+                            # Counting threshold function here
                             satellite_coordinate_list.append(coordinates)
+                        if verbosity:
+                            print(satellite_coordinate_list)
 
-                    filtered_spans = []
-                    seen_x = set()
-                    seen_y = set()
-                    for x, y in satellite_coordinate_list:
-                        if x in seen_x or y in seen_y:
-                            continue
-                        seen_x.add(x)
-                        seen_y.add(y)
-                        filtered_spans.append((x, y))
+                    if verbosity:
+                        print(f"Initial spans before filtering:\n{satellite_coordinate_list}\n")
 
-                    '''if args.verbose:
-                        print(f"{filtered_spans} filtered spans\n")'''
-
+                    filtered = []
+                    for x, y, count in satellite_coordinate_list:
+                        size = y - x
+                        count_size = count * win
+                        if (count_size <= size * 0.6) or (count < 10 and count_size <= size * 0.75):
+                            if args.verbose:
+                                print(f"Removing ({x}, {y}, {count}) - insufficient support")
+                        else:
+                            filtered.append((x, y, count))
+                    satellite_coordinate_list = filtered
+                    #sys.exit(0)
                     if seq_bounds:
                         # seq_bounds[0] is the name seq_bounds[1] is the start offset, 2 is the end offset
                         merged_coordinates = [
@@ -526,7 +566,7 @@ def main():
                                 end + int(seq_bounds[1]) - 1, # thickEnd
                                 "255,0,0"       # itemRgb
                             )
-                            for start, end in filtered_spans
+                            for start, end, _ in filtered
                         ]
                     else:
                         merged_coordinates = [
@@ -541,9 +581,9 @@ def main():
                                 end,      # thickEnd
                                 "255,0,0" # itemRgb
                             )
-                            for start, end in filtered_spans
+                            for start, end, _ in filtered
                         ]
-                    '''if args.verbose:
+                    '''if verbosity:
                         print(merged_coordinates)'''
 
                     df1 = pl.DataFrame(
@@ -587,6 +627,7 @@ def main():
                     os.makedirs(directory, exist_ok=True)
                     df_converted.write_csv(annotation_file_path, separator="\t")'''
 
+                    # If we are using a subseqeunce of a larger fasta, we need to adjust the coordinates back to the original reference frame before outputting
                     if seq_bounds:
                         #fa, seq_id, seq_len, band, offset, window, k, df: pl.DataFrame, classify, verbose, quiet) -> None:
                         tuple_of_lists = report_borders(
@@ -599,12 +640,11 @@ def main():
                             k=k_param,
                             df=df1,
                             classify=args.classify,
-                            verbose=args.verbose,
+                            verbose=verbosity,
                             quiet=args.quiet
                         )
-                        new_starts, new_ends, new_names = tuple_of_lists
-                        if args.verbose:
-                            print(tuple_of_lists)
+                        new_starts, new_ends, new_names, monomer, periodicity, hor = tuple_of_lists
+                        #print(tuple_of_lists)
                     else:
                         tuple_of_lists = report_borders(
                             fa=fasta,
@@ -616,12 +656,11 @@ def main():
                             k=k_param,
                             df=df1,
                             classify=args.classify,
-                            verbose=args.verbose,
+                            verbose=verbosity,
                             quiet=args.quiet
                         )
-                        new_starts, new_ends, new_names = tuple_of_lists
-                        if args.verbose:
-                            print(tuple_of_lists)
+                        new_starts, new_ends, new_names, monomer, periodicity, hor = tuple_of_lists
+                        #print(tuple_of_lists)
 
                     # Replace the columns in df1
                     if seq_bounds:
@@ -631,7 +670,7 @@ def main():
                             "start": [s + offset for s in new_starts],
                             "end": [e + offset for e in new_ends],
                             "name": new_names,
-                            "score": [0] * len(new_starts),
+                            "score": [e for e in monomer],
                             "strand": ["."] * len(new_starts),
                             "thickStart": [s + offset for s in new_starts],
                             "thickEnd": [e + offset for e in new_ends],
@@ -643,7 +682,7 @@ def main():
                             "start": new_starts,
                             "end": new_ends,
                             "name": new_names,
-                            "score": [0] * len(new_starts),
+                            "score": [e for e in monomer],
                             "strand": ["."] * len(new_starts),
                             "thickStart": new_starts,
                             "thickEnd": new_ends,
@@ -654,6 +693,10 @@ def main():
                     bedfilepath = os.path.join(directory,bedfilename)
                     os.makedirs(directory,exist_ok=True)
                     df2.write_csv(bedfilepath, separator="\t")
+
+                    csvfilename = f"{seq_id}.csv"
+                    csvfilepath = os.path.join(directory,csvfilename)
+                    write_summary_file(tuple_of_lists, csvfilepath)
 
                     print(f"Successfully finished annotating {seq_id} to {bedfilepath}\n")
 

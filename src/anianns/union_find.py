@@ -1,0 +1,297 @@
+from collections import defaultdict
+import seaborn as sns
+from scipy import ndimage
+import matplotlib.pyplot as plt
+import numpy as np
+
+# Function mapping colors to elements in the DSU
+def assign_colors(items, palette_name="tab20"):
+    """
+    Assigns a unique color to each unique item in the input list.
+
+    Parameters
+    ----------
+    items : list
+        Input list (can have repeated elements)
+    palette_name : str, optional
+        Name of a seaborn/matplotlib palette (e.g. 'tab10', 'tab20', 'Set3', 'Paired', 'Spectral')
+
+    Returns
+    -------
+    dict
+        Mapping of unique items -> color (as RGB tuples)
+    """
+    unique_items = list(dict.fromkeys(items))  # preserves order & uniqueness
+    n = len(unique_items)
+
+    # Get a palette with at least n colors; fall back to 'husl' if n is large
+    if n <= 20:
+        palette = sns.color_palette(palette_name, n)
+    else:
+        # HUSL gives well-separated colors for large n
+        palette = sns.color_palette("husl", n)
+
+    # Map each unique item to a color
+    color_map = dict(zip(unique_items, palette))
+    return color_map
+
+
+def sobel_with_diagonal_probes2(M, thresh=0.6, min_thick=1, figsize=(8, 8)):
+    """
+    Compute Sobel edges, display the binary edge map, and for each diagonal
+    position (i, i) that is empty (False), draw a red vertical line that
+    extends up and down until it hits a vertical run of True pixels with
+    thickness >= min_thick.
+
+    Parameters
+    ----------
+    M : 2D array
+        Image/matrix to edge-detect.
+    thresh : float
+        Threshold on normalized Sobel magnitude to make binary_edges.
+    min_thick : int
+        Minimum contiguous thickness (in pixels) of a vertical edge to stop.
+    figsize : tuple
+        Matplotlib figure size.
+    """
+    # --- Sobel edges ---
+    sobel_x = ndimage.sobel(M, axis=1)
+    sobel_y = ndimage.sobel(M, axis=0)
+    sobel_mag = np.hypot(sobel_x, sobel_y)
+    max_val = np.max(sobel_mag)
+    if max_val > 0:
+        sobel_mag = sobel_mag / max_val
+    binary_edges = sobel_mag > thresh
+
+    H, W = binary_edges.shape
+    N = min(H, W)
+
+    def stop_y(y0, x, dy):
+        """
+        March from y0 in direction dy (+1 down, -1 up) until:
+          - we hit image border, or
+          - we encounter a vertical run of True pixels with length >= min_thick
+            at column x, starting at the next step in the marching direction.
+        Returns the last y BEFORE the blocking run/border.
+        """
+        y = y0
+        while True:
+            ny = y + dy
+            if ny < 0 or ny >= H:
+                return y  # hit border
+
+            # Check if a vertical run with length >= min_thick begins at ny
+            if dy > 0:
+                end = min(ny + min_thick, H)
+                if end - ny == min_thick and np.all(binary_edges[ny:end, x]):
+                    return y
+            else:  # dy < 0
+                start = max(ny - (min_thick - 1), 0)
+                if ny - start + 1 >= min_thick and np.all(binary_edges[start:ny+1, x]):
+                    return y
+
+            y = ny  # keep marching
+
+    # --- Plot base image and mask ---
+    plt.figure(figsize=figsize)
+    plt.imshow(binary_edges, cmap='gray_r', interpolation='nearest')
+    plt.title('Sobel Edge Magnitude with Diagonal Probes')
+    plt.colorbar(label='Edge (binary)')
+
+    # --- For each diagonal position that is empty, drop a probe line ---
+    for i in range(N):
+        if not binary_edges[i, i]:  # "space on the diagonal"
+            y_top = stop_y(i, i, dy=-1)
+            y_bot = stop_y(i, i, dy=+1)
+            # Draw the vertical line at x=i from y_top to y_bot
+            plt.plot([i, i], [y_top, y_bot], '-', linewidth=1.5, color='red', alpha=0.9)
+
+    plt.tight_layout()
+    plt.show()
+    return binary_edges
+
+
+def sobel(M):
+    sobel_x = ndimage.sobel(M, axis=1)
+    sobel_y = ndimage.sobel(M, axis=0)
+    sobel_mag = np.hypot(sobel_x, sobel_y)
+    sobel_mag /= np.max(sobel_mag)  # Normalize
+    binary_edges = sobel_mag > 0.6
+
+
+    plt.imshow(binary_edges, cmap='gray_r')
+    plt.title('Sobel Edge Magnitude')
+    plt.colorbar()
+
+    plt.show()
+    return binary_edges
+
+def sobel_edges(M, thresh=0.6):
+    """Return binary Sobel edge map."""
+    sobel_x = ndimage.sobel(M, axis=1)
+    sobel_y = ndimage.sobel(M, axis=0)
+    sobel_mag = np.hypot(sobel_x, sobel_y)
+    mx = np.max(sobel_mag)
+    if mx > 0:
+        sobel_mag = sobel_mag / mx
+    binary_edges = sobel_mag > thresh
+    return binary_edges
+
+def find_offdiag_rectangles(M, thresh=0.6, band=5, connectivity=2,
+                            min_height=1, min_width=1, plot=True):
+    """
+    Find bounding boxes for connected components that do NOT intersect
+    a diagonal band |row-col| <= band. Returns list of (y0, x0, y1, x1).
+    """
+    edges = sobel_edges(M, thresh=thresh)
+    H, W = edges.shape
+
+    # Connected components on the full edge map
+    structure = ndimage.generate_binary_structure(2, connectivity)  # 4-conn if 1, 8-conn if 2
+    labeled, num = ndimage.label(edges, structure=structure)
+    slices = ndimage.find_objects(labeled)
+
+    rects = []
+    if slices is not None:
+        for label_id, sl in enumerate(slices, start=1):
+            if sl is None:
+                continue
+            sy, sx = sl
+            y0, y1 = sy.start, sy.stop
+            x0, x1 = sx.start, sx.stop
+
+            # Optional size filter
+            if (y1 - y0) < min_height or (x1 - x0) < min_width:
+                continue
+
+            # Gather pixels in this component
+            comp_mask = (labeled[sy, sx] == label_id)
+            if not np.any(comp_mask):
+                continue
+            # Compute deltas (row - col) in the subwindow
+            rr, cc = np.indices(comp_mask.shape)
+            rr += y0
+            cc += x0
+            deltas = (rr - cc)[comp_mask]
+
+            # "Bisect" criterion: crosses both sides of diagonal band
+            # i.e., has pixels with delta <= -band and delta >= +band
+            if deltas.min() <= -band and deltas.max() >= +band:
+                rects.append((y0, x0, y1, x1))
+
+    if plot:
+        plt.figure(figsize=(8, 8))
+        plt.imshow(edges, cmap='gray_r', interpolation='nearest')
+
+        # Visualize the diagonal band to show where "bisecting" occurs
+        rr, cc = np.indices((H, W))
+        band_mask = (np.abs(rr - cc) <= band)
+        band_vis = np.full_like(edges, np.nan, dtype=float)
+        band_vis[band_mask] = 1.0
+        plt.imshow(band_vis, cmap='Reds', alpha=0.25)  # diagonal band overlay
+
+        # Draw rectangles for bisecting components
+        ax = plt.gca()
+        for (yy0, xx0, yy1, xx1) in rects:
+            ax.add_patch(plt.Rectangle(
+                (xx0, yy0), xx1 - xx0, yy1 - yy0,
+                edgecolor='lime', facecolor='none', lw=2
+            ))
+        plt.title('Diagonal-bisecting component rectangles')
+        plt.tight_layout()
+        plt.show()
+
+    return rects
+
+class DSU:
+    def __init__(self, n=0):
+        self.parent = list(range(n))
+        self.size = [1] * n
+
+    def _grow_to(self, n):
+        # Ensure DSU has capacity for n items total
+        while len(self.parent) < n:
+            i = len(self.parent)
+            self.parent.append(i)
+            self.size.append(1)
+
+    def find(self, x):
+        if self.parent[x] != x:
+            self.parent[x] = self.find(self.parent[x])
+        return self.parent[x]
+
+    def union(self, a, b):
+        ra, rb = self.find(a), self.find(b)
+        if ra == rb:
+            return False
+        if self.size[ra] < self.size[rb]:
+            ra, rb = rb, ra
+        self.parent[rb] = ra
+        self.size[ra] += self.size[rb]
+        return True
+
+
+class TupleDSU:
+    """
+    Stores:
+      - 'point' items: (name, x, y, color)
+      - 'edge' items: (x0, y0, x1, y1)
+    Unions happen when coordinates match:
+      - point matches point at (x,y)
+      - edge matches anything touching (x0,y0) and/or (x1,y1)
+    """
+    def __init__(self):
+        self.items = []                 # heterogeneous: dicts with 'kind' field
+        self.dsu = DSU(0)
+        self.xy_map = defaultdict(list) # (x,y) -> list of indices registered at that coordinate
+
+    def _add_item(self, item, coords_to_register):
+        """
+        Internal helper:
+          - append item
+          - grow DSU
+          - register item under each coord in coords_to_register
+          - union with all previously registered indices at those coords
+        """
+        idx = len(self.items)
+        self.items.append(item)
+        self.dsu._grow_to(idx + 1)
+
+        for coord in coords_to_register:
+            # union with everything already at this coordinate
+            for j in self.xy_map[coord]:
+                self.dsu.union(idx, j)
+            # then register this new index for future matches
+            self.xy_map[coord].append(idx)
+
+        return idx
+
+    # --- Public APIs ---
+
+    def add_point(self, name, x, y, color):
+        """
+        Add a point-tuple (name, x, y, color).
+        Unions with any items already registered at (x,y).
+        """
+        item = {"kind": "point", "name": name, "x": x, "y": y, "color": color}
+        return self._add_item(item, coords_to_register=[(x, y)])
+
+    def add_edge(self, x0, y0, x1, y1):
+        """
+        Add an edge (x0, y0, x1, y1).
+        Unions with anything at (x0, y0) and anything at (x1, y1).
+        If both endpoints match existing items, this edge will connect those groups.
+        """
+        item = {"kind": "edge", "x0": x0, "y0": y0, "x1": x1, "y1": y1}
+        return self._add_item(item, coords_to_register=[(x0, y0), (x1, y1)])
+
+    def groups(self):
+        """
+        Returns groups as lists of stored items (points and/or edges).
+        """
+        from collections import defaultdict
+        buckets = defaultdict(list)
+        for i, it in enumerate(self.items):
+            root = self.dsu.find(i)
+            buckets[root].append(it)
+        return list(buckets.values())

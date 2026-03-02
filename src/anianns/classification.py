@@ -65,7 +65,7 @@ def classify_kmers(
     query_kmers: Set[int],
     kmer_supersets: Dict[str, Set[int]],
     min_overlap: int = 1,
-    verbose: bool = True,
+    verbose: bool = False,
 ) -> Tuple[Optional[str], List[Tuple[str, int, float]]]:
     """
     Classify a set of k-mers against known k-mer databases.
@@ -82,7 +82,7 @@ def classify_kmers(
         - List of (database_name, overlap_count, overlap_percentage) sorted by overlap_count descending
     """
     if not query_kmers:
-        return "Unknown", []
+        return "Unclassified", []
 
     results = []
     query_size = len(query_kmers)
@@ -100,15 +100,15 @@ def classify_kmers(
     results.sort(key=lambda x: x[1], reverse=True)
 
     # Show top 3 results if verbose
-    verbose = False
     if verbose:
         print("Top 3 classification matches:")
         for i, (db_name, overlap_count, overlap_percentage) in enumerate(results[:3]):
             print(
                 f"  {i+1}. {db_name}: {overlap_count} overlap ({overlap_percentage:.2f}%)"
             )
+        print("----\n")
 
-    best_match = "Unknown"
+    best_match = "Unclassified"
     if results:
         top_hit = results[0]
         if top_hit[1] >= min_overlap and top_hit[2] > 25.0:
