@@ -441,7 +441,7 @@ def write_summary_file(tuple_of_lists, out_csv_path: str) -> None:
     none_counter = 0
 
     for s, e, name, m, p, h in zip(new_starts, new_ends, new_names, monomer, periodicity, hor):
-        if name is None or name is "Unknown":
+        if name is None or name == "Unknown":
             none_counter += 1
             key = f"None_{none_counter}"  # unique row per None
             out_name = "Unclassified Repeat"

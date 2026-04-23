@@ -27,7 +27,19 @@ dependencies = [
 ]
 [project.optional-dependencies]
 moddotplot = ["moddotplot"]
-dev = ["black", "jupyter", "ipykernel", "pytest", "biopython"]
+dev = ["black", "coverage", "jupyter", "ipykernel", "pytest", "pytest-cov", "biopython"]
 [project.scripts]
 anianns = "anianns.__main__:main"
 anianns_kmer_db = "anianns.build_kmer_db:main"
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "--cov=anianns --cov-report=term-missing --cov-report=xml --cov-fail-under=80"
+
+[tool.coverage.run]
+source = ["anianns"]
+omit = [
+    "src/anianns/refine_boundaries.py",
+    "src/anianns/parse_matrix.py",
+    "src/anianns/union_find.py",
+]
