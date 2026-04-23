@@ -30,7 +30,6 @@ def intersection_matrix(overlapping, non_overlapping, k):
         a = non_overlapping[i]
         a_prime = overlapping[i]
         len_a = len(a)
-        inv_len_a = 1.0 / len_a
         for j in range(i, n):
             b = non_overlapping[j]
             b_prime = overlapping[j]
@@ -39,6 +38,7 @@ def intersection_matrix(overlapping, non_overlapping, k):
                 mat[i, j] = 0.0
                 mat[j, i] = 0.0
                 continue
+            inv_len_a = 1.0 / len_a
             inv_len_b = 1.0 / len_b
             inter1 = intersection_len(a, b_prime) * inv_len_a
             inter2 = intersection_len(a_prime, b) * inv_len_b

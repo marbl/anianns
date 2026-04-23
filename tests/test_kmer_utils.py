@@ -76,6 +76,23 @@ def test_kmer_generators_emit_progress_when_not_quiet(capsys):
     assert "Completed" in capsys.readouterr().out
 
 
+def test_kmer_generators_handle_short_sequences_with_progress_enabled(capsys):
+    seq = "ACTGA"
+
+    forward = list(generate_kmers_from_fasta_forward_only(seq, 4, False))
+    reverse = list(generate_kmers_from_fasta_reverse_only(seq, 4, False))
+    canonical = list(generate_kmers_from_fasta(seq, 4, False))
+
+    assert len(forward) == len(reverse) == len(canonical) == 2
+    assert "Completed" in capsys.readouterr().out
+
+
+def test_kmer_generators_return_empty_for_sequences_shorter_than_k():
+    assert list(generate_kmers_from_fasta_forward_only("ACT", 4, False)) == []
+    assert list(generate_kmers_from_fasta_reverse_only("ACT", 4, False)) == []
+    assert list(generate_kmers_from_fasta("ACT", 4, False)) == []
+
+
 def test_read_sequence_kmers_from_file_uses_fasta_fetch(monkeypatch):
     class FakeFasta:
         def __init__(self, filename):

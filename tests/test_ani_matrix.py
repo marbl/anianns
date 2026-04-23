@@ -15,12 +15,12 @@ def test_intersection_matrix_is_symmetric_and_handles_empty_windows():
     overlapping = [
         np.array([1, 2, 3], dtype=np.int32),
         np.array([2, 3, 4], dtype=np.int32),
-        np.array([4, 5], dtype=np.int32),
+        np.array([], dtype=np.int32),
     ]
     non_overlapping = [
         np.array([1, 2], dtype=np.int32),
         np.array([2, 4], dtype=np.int32),
-        np.array([4, 5], dtype=np.int32),
+        np.array([], dtype=np.int32),
     ]
 
     matrix = intersection_matrix.py_func(overlapping, non_overlapping, 2)
@@ -28,7 +28,8 @@ def test_intersection_matrix_is_symmetric_and_handles_empty_windows():
     assert matrix.shape == (3, 3)
     assert np.allclose(matrix, matrix.T)
     assert matrix[0, 0] == 100.0
-    assert matrix[2, 2] == 100.0
+    assert matrix[2, 2] == 0.0
+    assert matrix[0, 2] == 0.0
     assert matrix[0, 1] > 0.0
 
 

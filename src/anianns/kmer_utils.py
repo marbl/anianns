@@ -5,6 +5,13 @@ import numpy as np
 
 tab_b = bytes.maketrans(b"ACTG", b"TGAC")
 
+
+def _progress_settings(n: int, k: int):
+    total_kmers = n - k + 1
+    if total_kmers <= 0:
+        return 0, 1
+    return total_kmers, max(1, round(n / 77))
+
 def remove_ambiguous_bases(mod_list, k):
     # Ambiguous IUPAC codes
     bases_to_remove = ["R", "Y", "M", "K", "S", "W", "H", "B", "V", "D", "N"]
@@ -67,23 +74,25 @@ def read_sequence_kmers_from_file(
 
 def generate_kmers_from_fasta(seq: Sequence[str], k: int, quiet: bool) -> Iterable[int]:
     n = len(seq)
+    total_kmers, progress_thresholds = _progress_settings(n, k)
+    if total_kmers <= 0:
+        return
     if not quiet:
-        progress_thresholds = round(n / 77)
         print_progress_bar(
-            0, n - k + 1, prefix="Progress:", suffix="Complete", length=40
+            0, total_kmers, prefix="Progress:", suffix="Complete", length=40
         )
 
     bases_to_remove = ["R", "Y", "M", "K", "S", "W", "H", "B", "V", "D", "N"]
-    for i in range(n - k + 1):
+    for i in range(total_kmers):
         if not quiet:
             if i % progress_thresholds == 0:
                 print_progress_bar(
-                    i, n - k + 1, prefix="Progress:", suffix="Complete", length=40
+                    i, total_kmers, prefix="Progress:", suffix="Complete", length=40
                 )
-            if i == n - k:
+            if i == total_kmers - 1:
                 print_progress_bar(
-                    n - k + 1,
-                    n - k + 1,
+                    total_kmers,
+                    total_kmers,
                     prefix="Progress:",
                     suffix="Completed",
                     length=40,
@@ -107,22 +116,24 @@ def generate_kmers_from_fasta_forward_only(
     seq: Sequence[str], k: int, quiet: bool
 ) -> Iterable[int]:
     n = len(seq)
+    total_kmers, progress_thresholds = _progress_settings(n, k)
+    if total_kmers <= 0:
+        return
     if not quiet:
-        progress_thresholds = round(n / 77)
         print_progress_bar(
-            0, n - k + 1, prefix="Progress:", suffix="Complete", length=40
+            0, total_kmers, prefix="Progress:", suffix="Complete", length=40
         )
 
-    for i in range(n - k + 1):
+    for i in range(total_kmers):
         if not quiet:
             if i % progress_thresholds == 0:
                 print_progress_bar(
-                    i, n - k + 1, prefix="Progress:", suffix="Complete", length=40
+                    i, total_kmers, prefix="Progress:", suffix="Complete", length=40
                 )
-            if i == n - k:
+            if i == total_kmers - 1:
                 print_progress_bar(
-                    n - k + 1,
-                    n - k + 1,
+                    total_kmers,
+                    total_kmers,
                     prefix="Progress:",
                     suffix="Completed",
                     length=40,
@@ -138,22 +149,24 @@ def generate_kmers_from_fasta_reverse_only(
     seq: Sequence[str], k: int, quiet: bool
 ) -> Iterable[int]:
     n = len(seq)
+    total_kmers, progress_thresholds = _progress_settings(n, k)
+    if total_kmers <= 0:
+        return
     if not quiet:
-        progress_thresholds = round(n / 77)
         print_progress_bar(
-            0, n - k + 1, prefix="Progress:", suffix="Complete", length=40
+            0, total_kmers, prefix="Progress:", suffix="Complete", length=40
         )
 
-    for i in range(n - k + 1):
+    for i in range(total_kmers):
         if not quiet:
             if i % progress_thresholds == 0:
                 print_progress_bar(
-                    i, n - k + 1, prefix="Progress:", suffix="Complete", length=40
+                    i, total_kmers, prefix="Progress:", suffix="Complete", length=40
                 )
-            if i == n - k:
+            if i == total_kmers - 1:
                 print_progress_bar(
-                    n - k + 1,
-                    n - k + 1,
+                    total_kmers,
+                    total_kmers,
                     prefix="Progress:",
                     suffix="Completed",
                     length=40,
