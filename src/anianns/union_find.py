@@ -4,6 +4,7 @@ from scipy import ndimage
 import matplotlib.pyplot as plt
 import numpy as np
 
+
 # Function mapping colors to elements in the DSU
 def assign_colors(items, palette_name="tab20"):
     """
@@ -87,16 +88,18 @@ def sobel_with_diagonal_probes2(M, thresh=0.6, min_thick=1, figsize=(8, 8)):
                     return y
             else:  # dy < 0
                 start = max(ny - (min_thick - 1), 0)
-                if ny - start + 1 >= min_thick and np.all(binary_edges[start:ny+1, x]):
+                if ny - start + 1 >= min_thick and np.all(
+                    binary_edges[start : ny + 1, x]
+                ):
                     return y
 
             y = ny  # keep marching
 
     # --- Plot base image and mask ---
     plt.figure(figsize=figsize)
-    plt.imshow(binary_edges, cmap='gray_r', interpolation='nearest')
-    plt.title('Sobel Edge Magnitude with Diagonal Probes')
-    plt.colorbar(label='Edge (binary)')
+    plt.imshow(binary_edges, cmap="gray_r", interpolation="nearest")
+    plt.title("Sobel Edge Magnitude with Diagonal Probes")
+    plt.colorbar(label="Edge (binary)")
 
     # --- For each diagonal position that is empty, drop a probe line ---
     for i in range(N):
@@ -104,7 +107,7 @@ def sobel_with_diagonal_probes2(M, thresh=0.6, min_thick=1, figsize=(8, 8)):
             y_top = stop_y(i, i, dy=-1)
             y_bot = stop_y(i, i, dy=+1)
             # Draw the vertical line at x=i from y_top to y_bot
-            plt.plot([i, i], [y_top, y_bot], '-', linewidth=1.5, color='red', alpha=0.9)
+            plt.plot([i, i], [y_top, y_bot], "-", linewidth=1.5, color="red", alpha=0.9)
 
     plt.tight_layout()
     plt.show()
@@ -118,13 +121,13 @@ def sobel(M):
     sobel_mag /= np.max(sobel_mag)  # Normalize
     binary_edges = sobel_mag > 0.6
 
-
-    plt.imshow(binary_edges, cmap='gray_r')
-    plt.title('Sobel Edge Magnitude')
+    plt.imshow(binary_edges, cmap="gray_r")
+    plt.title("Sobel Edge Magnitude")
     plt.colorbar()
 
     plt.show()
     return binary_edges
+
 
 def sobel_edges(M, thresh=0.6):
     """Return binary Sobel edge map."""
@@ -137,8 +140,10 @@ def sobel_edges(M, thresh=0.6):
     binary_edges = sobel_mag > thresh
     return binary_edges
 
-def find_offdiag_rectangles(M, thresh=0.6, band=5, connectivity=2,
-                            min_height=1, min_width=1, plot=True):
+
+def find_offdiag_rectangles(
+    M, thresh=0.6, band=5, connectivity=2, min_height=1, min_width=1, plot=True
+):
     """
     Find bounding boxes for connected components that do NOT intersect
     a diagonal band |row-col| <= band. Returns list of (y0, x0, y1, x1).
@@ -147,7 +152,9 @@ def find_offdiag_rectangles(M, thresh=0.6, band=5, connectivity=2,
     H, W = edges.shape
 
     # Connected components on the full edge map
-    structure = ndimage.generate_binary_structure(2, connectivity)  # 4-conn if 1, 8-conn if 2
+    structure = ndimage.generate_binary_structure(
+        2, connectivity
+    )  # 4-conn if 1, 8-conn if 2
     labeled, num = ndimage.label(edges, structure=structure)
     slices = ndimage.find_objects(labeled)
 
@@ -165,7 +172,7 @@ def find_offdiag_rectangles(M, thresh=0.6, band=5, connectivity=2,
                 continue
 
             # Gather pixels in this component
-            comp_mask = (labeled[sy, sx] == label_id)
+            comp_mask = labeled[sy, sx] == label_id
             if not np.any(comp_mask):
                 continue
             # Compute deltas (row - col) in the subwindow
@@ -181,27 +188,34 @@ def find_offdiag_rectangles(M, thresh=0.6, band=5, connectivity=2,
 
     if plot:
         plt.figure(figsize=(8, 8))
-        plt.imshow(edges, cmap='gray_r', interpolation='nearest')
+        plt.imshow(edges, cmap="gray_r", interpolation="nearest")
 
         # Visualize the diagonal band to show where "bisecting" occurs
         rr, cc = np.indices((H, W))
-        band_mask = (np.abs(rr - cc) <= band)
+        band_mask = np.abs(rr - cc) <= band
         band_vis = np.full_like(edges, np.nan, dtype=float)
         band_vis[band_mask] = 1.0
-        plt.imshow(band_vis, cmap='Reds', alpha=0.25)  # diagonal band overlay
+        plt.imshow(band_vis, cmap="Reds", alpha=0.25)  # diagonal band overlay
 
         # Draw rectangles for bisecting components
         ax = plt.gca()
-        for (yy0, xx0, yy1, xx1) in rects:
-            ax.add_patch(plt.Rectangle(
-                (xx0, yy0), xx1 - xx0, yy1 - yy0,
-                edgecolor='lime', facecolor='none', lw=2
-            ))
-        plt.title('Diagonal-bisecting component rectangles')
+        for yy0, xx0, yy1, xx1 in rects:
+            ax.add_patch(
+                plt.Rectangle(
+                    (xx0, yy0),
+                    xx1 - xx0,
+                    yy1 - yy0,
+                    edgecolor="lime",
+                    facecolor="none",
+                    lw=2,
+                )
+            )
+        plt.title("Diagonal-bisecting component rectangles")
         plt.tight_layout()
         plt.show()
 
     return rects
+
 
 class DSU:
     def __init__(self, n=0):
@@ -240,10 +254,13 @@ class TupleDSU:
       - point matches point at (x,y)
       - edge matches anything touching (x0,y0) and/or (x1,y1)
     """
+
     def __init__(self):
-        self.items = []                 # heterogeneous: dicts with 'kind' field
+        self.items = []  # heterogeneous: dicts with 'kind' field
         self.dsu = DSU(0)
-        self.xy_map = defaultdict(list) # (x,y) -> list of indices registered at that coordinate
+        self.xy_map = defaultdict(
+            list
+        )  # (x,y) -> list of indices registered at that coordinate
 
     def _add_item(self, item, coords_to_register):
         """
@@ -290,6 +307,7 @@ class TupleDSU:
         Returns groups as lists of stored items (points and/or edges).
         """
         from collections import defaultdict
+
         buckets = defaultdict(list)
         for i, it in enumerate(self.items):
             root = self.dsu.find(i)

@@ -9,10 +9,7 @@ import os
 import pysam
 import math
 
-from anianns.ani_matrix import (
-    intersection_matrix,
-    intersection_matrix_inverted
-)
+from anianns.ani_matrix import intersection_matrix, intersection_matrix_inverted
 
 from anianns.build_kmer_db import (
     save_kmer_sets_shared_k,
@@ -30,13 +27,13 @@ from anianns.general_utils import (
     plot_matrix,
     read_bed_files,
     validate_json,
-    write_summary_file
+    write_summary_file,
 )
 
 from anianns.kmer_utils import (
     build_kmer_sets,
     generate_kmers_from_fasta,
-    print_progress_bar
+    print_progress_bar,
 )
 
 from anianns.parse_matrix import (
@@ -45,14 +42,19 @@ from anianns.parse_matrix import (
     merge_shared_boundaries,
     sobel_with_diagonal_probes,
     sobel_spans,
-    split_diagonal_attached
+    split_diagonal_attached,
 )
 
 from anianns.refine_boundaries import report_borders
 
-from anianns.union_find import sobel, sobel_with_diagonal_probes2, find_offdiag_rectangles
+from anianns.union_find import (
+    sobel,
+    sobel_with_diagonal_probes2,
+    find_offdiag_rectangles,
+)
 
 os.environ["KMP_WARNINGS"] = "FALSE"
+
 
 def mask_type(value):
     """Allow either integer or string values for --mask."""
@@ -104,7 +106,8 @@ def get_parser():
         help="Name of output directory. Default: current working directory.",
     )
     annotate_parser.add_argument(
-        "-o", "--output-format",
+        "-o",
+        "--output-format",
         choices=["bed", "gtf", "gff", "csv", "tsv", "json"],
         default="bed",
         help=(
@@ -114,7 +117,8 @@ def get_parser():
         ),
     )
     annotate_parser.add_argument(
-        "-m", "--mask",
+        "-m",
+        "--mask",
         nargs="*",
         type=mask_type,
         default=None,
@@ -173,12 +177,13 @@ def get_parser():
     )
     annotate_group = annotate_parser.add_mutually_exclusive_group()
     annotate_group.add_argument(
-        "-v", "--verbose", action="store_true",
-        help="Enable verbose logging output."
+        "-v", "--verbose", action="store_true", help="Enable verbose logging output."
     )
     annotate_group.add_argument(
-        "-q", "--quiet", action="store_true",
-        help="Suppress all logging output and text."
+        "-q",
+        "--quiet",
+        action="store_true",
+        help="Suppress all logging output and text.",
     )
 
     build_db_parser.add_argument(
@@ -213,12 +218,13 @@ def get_parser():
     )
     build_db_group = build_db_parser.add_mutually_exclusive_group()
     build_db_group.add_argument(
-        "-v", "--verbose", action="store_true",
-        help="Enable verbose logging output."
+        "-v", "--verbose", action="store_true", help="Enable verbose logging output."
     )
     build_db_group.add_argument(
-        "-q", "--quiet", action="store_true",
-        help="Suppress all logging output and text."
+        "-q",
+        "--quiet",
+        action="store_true",
+        help="Suppress all logging output and text.",
     )
 
     return parser
@@ -231,11 +237,11 @@ def main():
 
     args = get_parser().parse_args()
 
-    #-------- BUILD DB LOGIC --------#
+    # -------- BUILD DB LOGIC --------#
     if args.command == "build_db":
         if not args.directory:
             foldername = f"k_{args.kmer}"
-            args.directory = os.path.join(os.getcwd(),foldername)
+            args.directory = os.path.join(os.getcwd(), foldername)
         if not args.quiet:
             print(f"Building a k-mer database....\n")
         if args.config:
@@ -267,8 +273,8 @@ def main():
         # Normalize all BED DataFrames to have consistent schema before concatenating
         normalized_bedfiles = []
         required_columns = ["chrom", "start", "end", "name"]
-        
-        for df in bedfiles: 
+
+        for df in bedfiles:
             # Ensure all required columns exist
             for col in required_columns:
                 if col not in df.columns:
@@ -276,12 +282,14 @@ def main():
                         # Use chrom as default name if missing
                         df = df.with_columns(pl.col("chrom").alias("name"))
                     else:
-                        raise ValueError(f"Required column '{col}' missing from BED file")
-            
+                        raise ValueError(
+                            f"Required column '{col}' missing from BED file"
+                        )
+
             # Select only the columns we need for consistency
             normalized_df = df.select(required_columns)
             normalized_bedfiles.append(normalized_df)
-        
+
         # Concatenate normalized DataFrames
         bedfile_dfs = pl.concat(normalized_bedfiles)
         satellite_db = extract_regions_by_name(
@@ -317,7 +325,6 @@ def main():
 
         else:
             for key, value in satellite_db.items():
-
                 subtypes = [key]
                 sub_kmer_db = {name: satellite_db[name] for name in subtypes}
                 outputprefix = f"{key}.db"
@@ -328,13 +335,12 @@ def main():
                     sub_kmer_db, k=args.kmer, output_path=outputname
                 )
 
-    #-------- ANNOTATE LOGIC --------#
+    # -------- ANNOTATE LOGIC --------#
     elif args.command == "annotate":
-
         # Prep args
         band_height = int(args.band * 1_000_000)
-        interval    = (args.window + 1) // 2
-        directory     = args.directory or os.getcwd()
+        interval = (args.window + 1) // 2
+        directory = args.directory or os.getcwd()
 
         if not args.quiet:
             label_width = 20
@@ -344,7 +350,9 @@ def main():
             print(f"{'Band height:':<{label_width}} {band_height} bp")
             print(f"{'Window size:':<{label_width}} {args.window} bp")
             print(f"{'ANI threshold:':<{label_width}} {args.identity} %")
-            print(f"{'K-mer dir:':<{label_width}} {args.classify if args.classify else 'None provided'}")
+            print(
+                f"{'K-mer dir:':<{label_width}} {args.classify if args.classify else 'None provided'}"
+            )
             print("─" * 65)
 
         # Build list of (fasta, [seq_ids]) pairs
@@ -376,17 +384,17 @@ def main():
         fasta_handles = {f: pysam.FastaFile(f) for f, _ in pairs}
         try:
             # cache everything into locals
-            k_param    = args.kmer
-            win        = args.window
-            verbosity  = args.verbose
+            k_param = args.kmer
+            win = args.window
+            verbosity = args.verbose
             build_sets = build_kmer_sets
-            imat       = intersection_matrix
-            imat_inv   = intersection_matrix_inverted
-            get_span   = get_diagonal_span
+            imat = intersection_matrix
+            imat_inv = intersection_matrix_inverted
+            get_span = get_diagonal_span
             merge_intv = merge_shared_boundaries
 
             window_size = band_height + interval
-            max_len     = (band_height + win) // win
+            max_len = (band_height + win) // win
 
             # 4) Main loops
             for fasta, seq_ids in pairs:
@@ -419,7 +427,13 @@ def main():
                     kmer_it = generate_kmers_from_fasta(seq_str, k_param, True)
 
                     if not args.quiet:
-                        print_progress_bar(0, n_windows, prefix="Progress:", suffix="Complete", length=40)
+                        print_progress_bar(
+                            0,
+                            n_windows,
+                            prefix="Progress:",
+                            suffix="Complete",
+                            length=40,
+                        )
 
                     # Create initial window
                     kmers_list = list(islice(kmer_it, window_size))
@@ -431,27 +445,32 @@ def main():
 
                     # Plot here
                     if verbosity:
-                        print(f"Partitioning into {n_windows} windows of {band_height} bp each.\n")
+                        print(
+                            f"Partitioning into {n_windows} windows of {band_height} bp each.\n"
+                        )
                     if n_windows > 1:
                         if not args.quiet:
-                            print_progress_bar(1, n_windows, prefix="Progress:", suffix="Complete", length=40)
+                            print_progress_bar(
+                                1,
+                                n_windows,
+                                prefix="Progress:",
+                                suffix="Complete",
+                                length=40,
+                            )
                         # Get spans for the initial window
                         spans = get_span(initial_matrix, win, zero_tol=2)
 
                         # TODO: Remove low count spans
-                        '''for element in spans:
-                            print(element, element[1], element[1]*win, element[0][1]-element[0][0])'''
-                        
+                        """for element in spans:
+                            print(element, element[1], element[1]*win, element[0][1]-element[0][0])"""
+
                         # Replace 0 here with start prefix
                         for coordinates in merge_intv(
-                            intervals = spans, 
-                            prefix = 0, 
-                            window = win,
-                            verbose=verbosity
-                            ):
-                                satellite_coordinate_list.append(coordinates)
+                            intervals=spans, prefix=0, window=win, verbose=verbosity
+                        ):
+                            satellite_coordinate_list.append(coordinates)
                         # Iterate through the remaining windows
-                        for w in range(2, n_windows+1):
+                        for w in range(2, n_windows + 1):
                             if w == n_windows:
                                 chunk = list(kmer_it)
                             else:
@@ -463,59 +482,73 @@ def main():
                             kmers_list = kmers_list[-interval:] + chunk
 
                             ov, nov = build_sets(kmers_list, max_len, win, interval)
-                            
+
                             updated_matrix = imat(ov, nov, k_param)
-                            
 
                             inv = imat_inv(
-                                initial_matrix, updated_matrix,
-                                prev_ov, prev_nov,
-                                ov, nov,
-                                k_param
+                                initial_matrix,
+                                updated_matrix,
+                                prev_ov,
+                                prev_nov,
+                                ov,
+                                nov,
+                                k_param,
                             )
                             inv[inv < args.identity] = 0
-                            '''sob = sobel_with_diagonal_probes(inv, thresh=0.7, min_thick=1)
+                            """sob = sobel_with_diagonal_probes(inv, thresh=0.7, min_thick=1)
                             sys.exit(0)
-                            print(spans)'''
+                            print(spans)"""
                             if args.plot:
                                 plot_matrix(inv)
-                            #sys.exit(0)
-                            #plot_matrix(inv)
-                            #sob = sobel_with_diagonal_probes(inv, thresh=0.7, min_thick=1)
-                            #plot_matrix(sob)
+                            # sys.exit(0)
+                            # plot_matrix(inv)
+                            # sob = sobel_with_diagonal_probes(inv, thresh=0.7, min_thick=1)
+                            # plot_matrix(sob)
                             M_diag, M_distal = split_diagonal_attached(inv)
 
                             new_spans = get_span(updated_matrix, win, zero_tol=2)
-                            prefix_amount = band_height * (w-1)
-                            
-                            '''if verbosity:
-                                print(f"Current prefix: {prefix_amount}\n")'''
+                            prefix_amount = band_height * (w - 1)
+
+                            """if verbosity:
+                                print(f"Current prefix: {prefix_amount}\n")"""
                             for coordinates in merge_intv(
-                                intervals = new_spans, 
-                                prefix = prefix_amount, 
-                                window= win,
-                                verbose = verbosity
+                                intervals=new_spans,
+                                prefix=prefix_amount,
+                                window=win,
+                                verbose=verbosity,
                             ):
                                 satellite_coordinate_list.append(coordinates)
 
                             if args.verbose:
                                 print(satellite_coordinate_list)
                                 print("-----\n")
-                            '''probes = sobel_with_diagonal_probes(
+                            """probes = sobel_with_diagonal_probes(
                                 M = inv,
                                 thresh = 0.7,
                                 min_thick = 1,
-                            )'''
-                            #print(sobel_spans(probes,win))
+                            )"""
+                            # print(sobel_spans(probes,win))
                             # Roll matrices forward
                             initial_matrix, prev_ov, prev_nov = updated_matrix, ov, nov
 
                             # Update progress bar
                             if not args.quiet:
                                 if w == n_windows:
-                                    print_progress_bar(n_windows, n_windows, prefix="Progress:", suffix="Completed!\n", length=40)
+                                    print_progress_bar(
+                                        n_windows,
+                                        n_windows,
+                                        prefix="Progress:",
+                                        suffix="Completed!\n",
+                                        length=40,
+                                    )
                                 else:
-                                    print_progress_bar(w, n_windows, prefix="Progress:", suffix="Complete", length=40)
+                                    print_progress_bar(
+                                        w,
+                                        n_windows,
+                                        prefix="Progress:",
+                                        suffix="Complete",
+                                        length=40,
+                                    )
 
                     else:
                         # No progress bar in this case
@@ -526,11 +559,8 @@ def main():
                         M_diag, M_offdiag = split_diagonal_attached(initial_matrix)
 
                         for coordinates in merge_intv(
-                            intervals = spans, 
-                            prefix = 0, 
-                            window = win,
-                            verbose = verbosity
-                            ):
+                            intervals=spans, prefix=0, window=win, verbose=verbosity
+                        ):
                             # Append only if the counts pass a threshold
                             # Counting threshold function here
                             satellite_coordinate_list.append(coordinates)
@@ -538,62 +568,74 @@ def main():
                             print(satellite_coordinate_list)
 
                     if verbosity:
-                        print(f"Initial spans before filtering:\n{satellite_coordinate_list}\n")
+                        print(
+                            f"Initial spans before filtering:\n{satellite_coordinate_list}\n"
+                        )
 
                     filtered = []
                     for x, y, count in satellite_coordinate_list:
                         size = y - x
                         count_size = count * win
-                        if (count_size <= size * 0.6) or (count < 10 and count_size <= size * 0.75):
+                        if (count_size <= size * 0.6) or (
+                            count < 10 and count_size <= size * 0.75
+                        ):
                             if args.verbose:
-                                print(f"Removing ({x}, {y}, {count}) - insufficient support")
+                                print(
+                                    f"Removing ({x}, {y}, {count}) - insufficient support"
+                                )
                         else:
                             filtered.append((x, y, count))
                     satellite_coordinate_list = filtered
-                    #sys.exit(0)
+                    # sys.exit(0)
                     if seq_bounds:
                         # seq_bounds[0] is the name seq_bounds[1] is the start offset, 2 is the end offset
                         merged_coordinates = [
                             (
-                                seq_bounds[0],   # chrom
+                                seq_bounds[0],  # chrom
                                 start + int(seq_bounds[1]),
                                 end + int(seq_bounds[1]) - 1,
-                                seq_bounds[0],   # name
-                                0,        # score
-                                ".",      # strand
-                                start + int(seq_bounds[1]),    # thickStart
-                                #end + seq_bounds[1],      # thickEnd
-                                end + int(seq_bounds[1]) - 1, # thickEnd
-                                "255,0,0"       # itemRgb
+                                seq_bounds[0],  # name
+                                0,  # score
+                                ".",  # strand
+                                start + int(seq_bounds[1]),  # thickStart
+                                # end + seq_bounds[1],      # thickEnd
+                                end + int(seq_bounds[1]) - 1,  # thickEnd
+                                "255,0,0",  # itemRgb
                             )
                             for start, end, _ in filtered
                         ]
                     else:
                         merged_coordinates = [
                             (
-                                seq_id,   # chrom
-                                start,    # start
-                                end,      # end
-                                seq_id,   # name
-                                0,        # score
-                                ".",      # strand
-                                start,    # thickStart
-                                end,      # thickEnd
-                                "255,0,0" # itemRgb
+                                seq_id,  # chrom
+                                start,  # start
+                                end,  # end
+                                seq_id,  # name
+                                0,  # score
+                                ".",  # strand
+                                start,  # thickStart
+                                end,  # thickEnd
+                                "255,0,0",  # itemRgb
                             )
                             for start, end, _ in filtered
                         ]
-                    '''if verbosity:
-                        print(merged_coordinates)'''
+                    """if verbosity:
+                        print(merged_coordinates)"""
 
                     df1 = pl.DataFrame(
                         merged_coordinates,
                         schema=[
-                            "#chrom", "start", "end",
-                            "name", "score", "strand",
-                            "thickStart", "thickEnd", "itemRgb"
+                            "#chrom",
+                            "start",
+                            "end",
+                            "name",
+                            "score",
+                            "strand",
+                            "thickStart",
+                            "thickEnd",
+                            "itemRgb",
                         ],
-                        orient="row"
+                        orient="row",
                     )
 
                     # TODO: Fix formatting
@@ -622,18 +664,18 @@ def main():
                         suffix = "bed"'''
                     suffix = "bed"
                     df_converted = df1
-                    '''annotation_file_name = f"{seq_id}_unrefined.{suffix}"
+                    """annotation_file_name = f"{seq_id}_unrefined.{suffix}"
                     annotation_file_path = os.path.join(directory, annotation_file_name)
                     os.makedirs(directory, exist_ok=True)
-                    df_converted.write_csv(annotation_file_path, separator="\t")'''
+                    df_converted.write_csv(annotation_file_path, separator="\t")"""
 
                     # If we are using a subseqeunce of a larger fasta, we need to adjust the coordinates back to the original reference frame before outputting
                     if seq_bounds:
-                        #fa, seq_id, seq_len, band, offset, window, k, df: pl.DataFrame, classify, verbose, quiet) -> None:
+                        # fa, seq_id, seq_len, band, offset, window, k, df: pl.DataFrame, classify, verbose, quiet) -> None:
                         tuple_of_lists = report_borders(
                             fa=fasta,
                             seq_id=seq_id,
-                            seq_len=seq_len, 
+                            seq_len=seq_len,
                             band=args.band,
                             offset=seq_bounds[1],
                             window=win,
@@ -641,15 +683,22 @@ def main():
                             df=df1,
                             classify=args.classify,
                             verbose=verbosity,
-                            quiet=args.quiet
+                            quiet=args.quiet,
                         )
-                        new_starts, new_ends, new_names, monomer, periodicity, hor = tuple_of_lists
-                        #print(tuple_of_lists)
+                        (
+                            new_starts,
+                            new_ends,
+                            new_names,
+                            monomer,
+                            periodicity,
+                            hor,
+                        ) = tuple_of_lists
+                        # print(tuple_of_lists)
                     else:
                         tuple_of_lists = report_borders(
                             fa=fasta,
                             seq_id=seq_id,
-                            seq_len=seq_len, 
+                            seq_len=seq_len,
                             band=args.band,
                             offset=1,
                             window=win,
@@ -657,48 +706,61 @@ def main():
                             df=df1,
                             classify=args.classify,
                             verbose=verbosity,
-                            quiet=args.quiet
+                            quiet=args.quiet,
                         )
-                        new_starts, new_ends, new_names, monomer, periodicity, hor = tuple_of_lists
-                        #print(tuple_of_lists)
+                        (
+                            new_starts,
+                            new_ends,
+                            new_names,
+                            monomer,
+                            periodicity,
+                            hor,
+                        ) = tuple_of_lists
+                        # print(tuple_of_lists)
 
                     # Replace the columns in df1
                     if seq_bounds:
                         offset = int(seq_bounds[1])
-                        df2 = pl.DataFrame({
-                            "#chrom": [seq_id] * len(new_starts),
-                            "start": [s + offset for s in new_starts],
-                            "end": [e + offset for e in new_ends],
-                            "name": new_names,
-                            "score": [e for e in monomer],
-                            "strand": ["."] * len(new_starts),
-                            "thickStart": [s + offset for s in new_starts],
-                            "thickEnd": [e + offset for e in new_ends],
-                            "itemRgb": ["0,0,0"] * len(new_starts)
-                        })
+                        df2 = pl.DataFrame(
+                            {
+                                "#chrom": [seq_id] * len(new_starts),
+                                "start": [s + offset for s in new_starts],
+                                "end": [e + offset for e in new_ends],
+                                "name": new_names,
+                                "score": [e for e in monomer],
+                                "strand": ["."] * len(new_starts),
+                                "thickStart": [s + offset for s in new_starts],
+                                "thickEnd": [e + offset for e in new_ends],
+                                "itemRgb": ["0,0,0"] * len(new_starts),
+                            }
+                        )
                     else:
-                        df2 = pl.DataFrame({
-                            "#chrom": [seq_id] * len(new_starts),
-                            "start": new_starts,
-                            "end": new_ends,
-                            "name": new_names,
-                            "score": [e for e in monomer],
-                            "strand": ["."] * len(new_starts),
-                            "thickStart": new_starts,
-                            "thickEnd": new_ends,
-                            "itemRgb": ["0,0,0"] * len(new_starts)
-                        })
+                        df2 = pl.DataFrame(
+                            {
+                                "#chrom": [seq_id] * len(new_starts),
+                                "start": new_starts,
+                                "end": new_ends,
+                                "name": new_names,
+                                "score": [e for e in monomer],
+                                "strand": ["."] * len(new_starts),
+                                "thickStart": new_starts,
+                                "thickEnd": new_ends,
+                                "itemRgb": ["0,0,0"] * len(new_starts),
+                            }
+                        )
 
                     bedfilename = f"{seq_id}.bed"
-                    bedfilepath = os.path.join(directory,bedfilename)
-                    os.makedirs(directory,exist_ok=True)
+                    bedfilepath = os.path.join(directory, bedfilename)
+                    os.makedirs(directory, exist_ok=True)
                     df2.write_csv(bedfilepath, separator="\t")
 
                     csvfilename = f"{seq_id}.csv"
-                    csvfilepath = os.path.join(directory,csvfilename)
+                    csvfilepath = os.path.join(directory, csvfilename)
                     write_summary_file(tuple_of_lists, csvfilepath)
 
-                    print(f"Successfully finished annotating {seq_id} to {bedfilepath}\n")
+                    print(
+                        f"Successfully finished annotating {seq_id} to {bedfilepath}\n"
+                    )
 
         except Exception as e:
             print(e)

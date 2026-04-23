@@ -1,6 +1,7 @@
 import gzip
 import struct
 
+
 def load_kmer_sets_shared_k(path: str) -> tuple[int, dict[str, set[int]]]:
     try:
         with gzip.open(path, "rb") as f:

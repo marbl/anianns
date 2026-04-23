@@ -1,5 +1,6 @@
 ![Release](https://img.shields.io/github/v/release/marbl/anianns?sort=semver&label=stable%20release)
 ![Coverage](https://img.shields.io/codecov/c/github/marbl/anianns?label=coverage)
+![Black](https://img.shields.io/badge/code%20style-black-000000.svg)
 
 ![](images/anianns_logo.png)
 

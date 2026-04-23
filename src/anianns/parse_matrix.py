@@ -4,6 +4,7 @@ from scipy import ndimage
 from statistics import median
 import matplotlib.pyplot as plt
 
+
 def append_coordinates(satellite_coordinate_list, prefix, matrix, window, off_diagonal):
     M_diag, M_offdiag = split_diagonal_attached(matrix)
     if off_diagonal:
@@ -18,35 +19,48 @@ def append_coordinates(satellite_coordinate_list, prefix, matrix, window, off_di
 def check_same_start_end(pairs, s, window, start):
     lo, hi = s - window, s + window
     if start:
-        return [(x,y,count) for x,y,count in pairs if lo <= x <= hi]
+        return [(x, y, count) for x, y, count in pairs if lo <= x <= hi]
     else:
-        return [(x,y,count) for x,y,count in pairs if lo <= y <= hi]
+        return [(x, y, count) for x, y, count in pairs if lo <= y <= hi]
+
 
 def check_new_contained(pairs, start, end):
-    return [(x,y,count) for x,y,count in pairs if (x > start) and (y < end)]
+    return [(x, y, count) for x, y, count in pairs if (x > start) and (y < end)]
+
 
 def check_new_spans(pairs, start, end):
-    return [(x,y,count) for x,y,count in pairs if (x < start) and (y > end)]
+    return [(x, y, count) for x, y, count in pairs if (x < start) and (y > end)]
+
 
 def find_in_range_x(data, min_val, max_val):
     return [(i, t) for i, t in enumerate(data) if min_val <= t[0] <= max_val]
 
+
 def find_in_range_y(data, min_val, max_val):
     return [(i, t) for i, t in enumerate(data) if min_val <= t[1] <= max_val]
 
+
 def find_contained(data, min_val_x, max_val_x, min_val_y, max_val_y):
-    return [(i, t) for i, t in enumerate(data) if (min_val_x > t[0]) and (max_val_y < t[1])]
+    return [
+        (i, t) for i, t in enumerate(data) if (min_val_x > t[0]) and (max_val_y < t[1])
+    ]
+
 
 def find_spanning(data, min_val_x, max_val_x, min_val_y, max_val_y):
-    return [(i, t) for i, t in enumerate(data) if ((min_val_x < t[0]) and (max_val_y > t[1]))]
+    return [
+        (i, t)
+        for i, t in enumerate(data)
+        if ((min_val_x < t[0]) and (max_val_y > t[1]))
+    ]
+
 
 def get_diagonal_span(matrix, window, zero_tol):
     n = matrix.shape[0]
     lengths = [0] * n
-    coords  = [(0, 0)] * n
+    coords = [(0, 0)] * n
 
     for i in range(n):
-        row = matrix[i]         # local view of row i
+        row = matrix[i]  # local view of row i
         start = end = i
         cnt = 0
 
@@ -75,14 +89,14 @@ def get_diagonal_span(matrix, window, zero_tol):
                     break
 
         lengths[i] = cnt
-        coords[i]  = (start * window, (end * window) + window)
-    
+        coords[i] = (start * window, (end * window) + window)
+
     tuple_counts = Counter(coords)
     sorted_items = sorted(
-        ((k, v) for k, v in tuple_counts.items() if v >= 3),
-        key=lambda item: item[0][0]
+        ((k, v) for k, v in tuple_counts.items() if v >= 3), key=lambda item: item[0][0]
     )
     return sorted_items
+
 
 def merge_shared_boundaries(intervals, prefix, window, verbose=True):
     """
@@ -92,42 +106,53 @@ def merge_shared_boundaries(intervals, prefix, window, verbose=True):
     out = []  # list of (x, y, count)
 
     # cache the conflict-check functions for faster lookup
-    chk_same = check_same_start_end      # expects: (pairs_list, val, window, is_start)
-    chk_cont = check_new_contained       # expects: (pairs_list, x, y) checks if new sequence is smaller
-    chk_span = check_new_spans          # expects: (pairs_list, x, y) checks if new seq is bigger
+    chk_same = check_same_start_end  # expects: (pairs_list, val, window, is_start)
+    chk_cont = check_new_contained  # expects: (pairs_list, x, y) checks if new sequence is smaller
+    chk_span = (
+        check_new_spans  # expects: (pairs_list, x, y) checks if new seq is bigger
+    )
 
     for (x, y), count in intervals:
         if verbose:
-            print(x,y,count)
+            print(x, y, count)
         # Base case, append to out if empty
         if len(out) == 0:
             out.append((x, y, count))
             continue
         else:
             # Initialize start and end window buffers
-            start_range = (x - (window*2), x + (window*2))
-            end_range = (y - (window*2), y + (window*2))
+            start_range = (x - (window * 2), x + (window * 2))
+            end_range = (y - (window * 2), y + (window * 2))
             process_entry(
-                out = out,
-                x = x,
-                y = y,
-                count = count,
-                start_range = start_range,
-                end_range = end_range,
+                out=out,
+                x=x,
+                y=y,
+                count=count,
+                start_range=start_range,
+                end_range=end_range,
                 find_in_range_x=find_in_range_x,
                 find_in_range_y=find_in_range_y,
                 find_contained=find_contained,
                 find_spanning=find_spanning,
-                verbose=verbose
+                verbose=verbose,
             )
             print
     return [(x + prefix, y + prefix, cnt) for x, y, cnt in out]
 
-def process_entry(out, x, y, count,
-                  start_range, end_range,
-                  find_in_range_x, find_in_range_y,
-                  find_contained, find_spanning,
-                  verbose=False):
+
+def process_entry(
+    out,
+    x,
+    y,
+    count,
+    start_range,
+    end_range,
+    find_in_range_x,
+    find_in_range_y,
+    find_contained,
+    find_spanning,
+    verbose=False,
+):
     """
     Chooses the best prior entry to merge with (if any), then updates 'out'.
     Priority: match on both x & y (same index) > x > y > spanning > contained.
@@ -163,12 +188,16 @@ def process_entry(out, x, y, count,
             reason = "y"
         else:
             # Only now attempt the more general/expensive checks
-            c_s = find_spanning(data=out, min_val_x=x, max_val_x=x, min_val_y=y, max_val_y=y)
+            c_s = find_spanning(
+                data=out, min_val_x=x, max_val_x=x, min_val_y=y, max_val_y=y
+            )
             if c_s:
                 idx = c_s[0][0]
                 reason = "spanning"
             else:
-                c_c = find_contained(data=out, min_val_x=x, max_val_x=x, min_val_y=y, max_val_y=y)
+                c_c = find_contained(
+                    data=out, min_val_x=x, max_val_x=x, min_val_y=y, max_val_y=y
+                )
                 if c_c:
                     idx = c_c[0][0]
                     reason = "contained"
@@ -182,11 +211,12 @@ def process_entry(out, x, y, count,
         if verbose:
             print(f"Appended new: {(x, y, count)}")
 
+
 def sobel_spans(M, prefix):
     spans = []
     i = 0
     while i < len(M):
-        #print(M[i])
+        # print(M[i])
 
         h = int(abs(M[i][3]))  # window length from height
 
@@ -195,7 +225,7 @@ def sobel_spans(M, prefix):
             continue
 
         end = min(i + h, len(M))  # clamp to array length
-        if end <= i:              # safety, though h>0 makes this unlikely
+        if end <= i:  # safety, though h>0 makes this unlikely
             i += 1
             continue
 
@@ -203,14 +233,15 @@ def sobel_spans(M, prefix):
         med = median(window)
 
         if 0.75 <= med / h <= 1.25:
-            #print("Yes")
-            spans.append((i-1,i+h+1))
+            # print("Yes")
+            spans.append((i - 1, i + h + 1))
             i += h
         else:
-            #print("No")
+            # print("No")
             i += 1
     spans = [(prefix * a, prefix * b) for (a, b) in spans]
     return spans
+
 
 def sobel_with_diagonal_probes(M, thresh=0.7, min_thick=1):
     """
@@ -263,16 +294,18 @@ def sobel_with_diagonal_probes(M, thresh=0.7, min_thick=1):
                     return y
             else:  # dy < 0
                 start = max(ny - (min_thick - 1), 0)
-                if ny - start + 1 >= min_thick and np.all(binary_edges[start:ny+1, x]):
+                if ny - start + 1 >= min_thick and np.all(
+                    binary_edges[start : ny + 1, x]
+                ):
                     return y
 
             y = ny  # keep marching
 
     # --- Plot base image and mask ---
-    plt.figure(figsize=(8,8))
-    plt.imshow(binary_edges, cmap='gray_r', interpolation='nearest')
-    plt.title('Sobel Edge Magnitude with Diagonal Probes')
-    plt.colorbar(label='Edge (binary)')
+    plt.figure(figsize=(8, 8))
+    plt.imshow(binary_edges, cmap="gray_r", interpolation="nearest")
+    plt.title("Sobel Edge Magnitude with Diagonal Probes")
+    plt.colorbar(label="Edge (binary)")
 
     # --- For each diagonal position that is empty, drop a probe line ---
     for i in range(N):
@@ -280,7 +313,7 @@ def sobel_with_diagonal_probes(M, thresh=0.7, min_thick=1):
             y_top = stop_y(i, i, dy=-1)
             y_bot = stop_y(i, i, dy=+1)
             # Draw the vertical line at x=i from y_top to y_bot
-            plt.plot([i, i], [y_top, y_bot], '-', linewidth=1.5, color='red', alpha=0.9)
+            plt.plot([i, i], [y_top, y_bot], "-", linewidth=1.5, color="red", alpha=0.9)
 
     plt.tight_layout()
     plt.show()
@@ -289,24 +322,21 @@ def sobel_with_diagonal_probes(M, thresh=0.7, min_thick=1):
         if not binary_edges[i, i]:  # "space on the diagonal"
             y_top = stop_y(i, i, dy=-1)
             y_bot = stop_y(i, i, dy=+1)
-            ranges.append((i, y_top,y_bot, y_top-y_bot))
+            ranges.append((i, y_top, y_bot, y_top - y_bot))
     return ranges
+
 
 def split_diagonal_attached(M):
     binary = M > 0
-    vertical_structure = np.array([[0, 1, 0],
-                          [0, 1, 0],
-                          [0, 1, 0]], dtype=int)
-    horizontal_structure = np.array([[0, 0, 0],
-                          [1, 1, 1],
-                          [0, 0, 0]], dtype=int)
+    vertical_structure = np.array([[0, 1, 0], [0, 1, 0], [0, 1, 0]], dtype=int)
+    horizontal_structure = np.array([[0, 0, 0], [1, 1, 1], [0, 0, 0]], dtype=int)
     vertical_labeled, _ = ndimage.label(binary, structure=vertical_structure)
     horizontal_labeled, _ = ndimage.label(binary, structure=horizontal_structure)
 
     diag_indices = np.arange(min(M.shape))
     vertical_diag_labels = np.unique(vertical_labeled[diag_indices, diag_indices])
     horizontal_diag_labels = np.unique(horizontal_labeled[diag_indices, diag_indices])
-    
+
     vertical_keep_mask = np.isin(vertical_labeled, vertical_diag_labels)
     horizontal_keep_mask = np.isin(horizontal_labeled, horizontal_diag_labels)
 
@@ -316,6 +346,7 @@ def split_diagonal_attached(M):
     M_offdiag = M * (~combined_mask)
 
     return M_diag, M_offdiag
+
 
 def _update_out(out, index, x, y, count, verbose=False):
     old_x, old_y, old_count = out[index]

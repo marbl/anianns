@@ -1,4 +1,5 @@
 import struct
+
 ASCII_ART = r"""
                                                  __       __
      _          _     _                        .'  `'._.'`  '.

@@ -2,7 +2,8 @@ import os
 import json
 from typing import Union, List, Dict
 from anianns.const import BED_COLUMNS
-#from anianns.kmer_utils import generateKmersFromFasta, generateKmersFromFastaForwardOnly
+
+# from anianns.kmer_utils import generateKmersFromFasta, generateKmersFromFastaForwardOnly
 from itertools import islice
 import polars as pl
 import pysam
@@ -11,16 +12,18 @@ import numpy as np
 import re
 import matplotlib.pyplot as plt
 import seaborn as sns
-import csv 
+import csv
 
 from anianns.kmer_utils import (
     generate_kmers_from_fasta,
-    generate_kmers_from_fasta_forward_only
+    generate_kmers_from_fasta_forward_only,
 )
+
 
 def add_prefix_to_tuples(data, band_height, w):
     prefix_amount = band_height * (w - 1)
     return [(start + prefix_amount, end + prefix_amount) for start, end in data]
+
 
 def calculate_distances(numbers):
     indices_map = {}
@@ -41,6 +44,7 @@ def calculate_distances(numbers):
 
     return distances
 
+
 def check_bed_vs_indexed_fasta(
     bed_dfs: List[pl.DataFrame], fasta_paths: Union[str, List[str]]
 ) -> None:
@@ -59,6 +63,7 @@ def check_bed_vs_indexed_fasta(
             )
             return False
     return True
+
 
 def convert_dataframe_format(df: pl.DataFrame, format: str) -> str:
     """
@@ -82,41 +87,39 @@ def convert_dataframe_format(df: pl.DataFrame, format: str) -> str:
     # --- BED → GTF conversion ---
     if format == "gtf":
         # GTF columns: seqname, source, feature, start, end, score, strand, frame, attribute
-        gtf_df = df.select([
-            pl.col("chrom").alias("seqname"),
-            pl.lit("converted").alias("source"),
-            pl.lit("exon").alias("feature"),
-            pl.col("start"),
-            pl.col("end"),
-            pl.col("score"),
-            pl.col("strand"),
-            pl.lit(".").alias("frame"),
-            (
-                pl.concat_str([
-                    pl.lit('gene_id "'), pl.col("name"), pl.lit('";')
-                ])
-            ).alias("attribute")
-        ])
+        gtf_df = df.select(
+            [
+                pl.col("chrom").alias("seqname"),
+                pl.lit("converted").alias("source"),
+                pl.lit("exon").alias("feature"),
+                pl.col("start"),
+                pl.col("end"),
+                pl.col("score"),
+                pl.col("strand"),
+                pl.lit(".").alias("frame"),
+                (
+                    pl.concat_str([pl.lit('gene_id "'), pl.col("name"), pl.lit('";')])
+                ).alias("attribute"),
+            ]
+        )
         return gtf_df.write_csv(None, separator="\t", include_header=False)
 
     # --- BED → GFF conversion ---
     elif format == "gff":
         # GFF columns: seqid, source, type, start, end, score, strand, phase, attributes
-        gff_df = df.select([
-            pl.col("chrom").alias("seqid"),
-            pl.lit("converted").alias("source"),
-            pl.lit("region").alias("type"),
-            pl.col("start"),
-            pl.col("end"),
-            pl.col("score"),
-            pl.col("strand"),
-            pl.lit(".").alias("phase"),
-            (
-                pl.concat_str([
-                    pl.lit("ID="), pl.col("name")
-                ])
-            ).alias("attributes")
-        ])
+        gff_df = df.select(
+            [
+                pl.col("chrom").alias("seqid"),
+                pl.lit("converted").alias("source"),
+                pl.lit("region").alias("type"),
+                pl.col("start"),
+                pl.col("end"),
+                pl.col("score"),
+                pl.col("strand"),
+                pl.lit(".").alias("phase"),
+                (pl.concat_str([pl.lit("ID="), pl.col("name")])).alias("attributes"),
+            ]
+        )
         return gff_df.write_csv(None, separator="\t", include_header=False)
 
     # --- CSV ---
@@ -132,7 +135,9 @@ def convert_dataframe_format(df: pl.DataFrame, format: str) -> str:
         return df.write_json()
 
     else:
-        raise ValueError("Invalid format. Choose from: 'gtf', 'gff', 'csv', 'tsv', 'json'.")
+        raise ValueError(
+            "Invalid format. Choose from: 'gtf', 'gff', 'csv', 'tsv', 'json'."
+        )
 
 
 def define_bounds(seq_name):
@@ -157,6 +162,7 @@ def define_bounds(seq_name):
 
     # No match
     return None
+
 
 def extract_region(fasta_file, chr, region_start, region_end):
     """
@@ -233,6 +239,7 @@ def extract_regions_by_name(
 
     return kmer_dict
 
+
 def extract_histograms_by_name(
     df: pl.DataFrame, fasta_files: Union[str, List[str]], k: int, verbose: bool
 ) -> Dict[str, List]:
@@ -298,6 +305,7 @@ def get_fasta_indexed_chroms(fasta_paths: Union[str, List[str]]) -> set:
             print(f"[ERROR] Failed to open or index FASTA file: {path}\n{e}")
     return chroms
 
+
 def get_input_headers(filename: List) -> List:
     header_list = []
     for file in filename:
@@ -312,6 +320,7 @@ def get_input_headers(filename: List) -> List:
 
     return header_list
 
+
 def merge_close_values(pairs, tolerance=1):
     # sort by value first for correct merging
     pairs = sorted(pairs, key=lambda x: x[0])
@@ -320,11 +329,9 @@ def merge_close_values(pairs, tolerance=1):
 
     for value, count in pairs:
         if not merged:
-            merged.append({
-                "values": [(value, count)],
-                "total_count": count,
-                "rep_value": value
-            })
+            merged.append(
+                {"values": [(value, count)], "total_count": count, "rep_value": value}
+            )
             continue
 
         last = merged[-1]
@@ -332,15 +339,11 @@ def merge_close_values(pairs, tolerance=1):
         if abs(last["rep_value"] - value) <= tolerance:
             last["values"].append((value, count))
             last["total_count"] += count
-            last["rep_value"] = max(
-                last["values"], key=lambda x: x[1]
-            )[0]
+            last["rep_value"] = max(last["values"], key=lambda x: x[1])[0]
         else:
-            merged.append({
-                "values": [(value, count)],
-                "total_count": count,
-                "rep_value": value
-            })
+            merged.append(
+                {"values": [(value, count)], "total_count": count, "rep_value": value}
+            )
 
     # 🔑 sort final output by total_count (descending)
     result = [(g["rep_value"], g["total_count"]) for g in merged]
@@ -348,21 +351,23 @@ def merge_close_values(pairs, tolerance=1):
 
     return result
 
+
 def plot_matrix(matrix, title="Matrix Plot", cmap="gray_r", show_colorbar=True):
     if not isinstance(matrix, np.ndarray):
         raise TypeError("Input must be a NumPy array")
     if matrix.ndim != 2:
         raise ValueError("Input must be a 2D matrix")
 
-    plt.imshow(matrix, cmap=cmap, aspect='auto', vmin=86)
+    plt.imshow(matrix, cmap=cmap, aspect="auto", vmin=86)
     plt.title(title)
     plt.xlabel("Columns")
     plt.ylabel("Rows")
 
     if show_colorbar:
-        plt.colorbar(label='Value')
+        plt.colorbar(label="Value")
 
     plt.show()
+
 
 def read_bed_files(files: Union[str, List[str]]) -> List[pl.DataFrame]:
     if isinstance(files, str):
@@ -401,12 +406,14 @@ def read_bed_files(files: Union[str, List[str]]) -> List[pl.DataFrame]:
 
     return dataframes
 
+
 def top_n_frequent_distances(distances, n=5):
     # Count the occurrences of each distance
     distance_counts = Counter(distances)
     # Get the top n most common distances
     top_n = distance_counts.most_common(n)
     return top_n
+
 
 def validate_json(path: str, required_keys: list = None) -> bool:
     if not os.path.isfile(path):
@@ -428,19 +435,29 @@ def validate_json(path: str, required_keys: list = None) -> bool:
 
     return True
 
+
 def write_summary_file(tuple_of_lists, out_csv_path: str) -> None:
     new_starts, new_ends, new_names, monomer, periodicity, hor = tuple_of_lists
 
     # Basic sanity check
     n = len(new_starts)
-    if not (len(new_ends) == len(new_names) == len(monomer) == len(periodicity) == len(hor) == n):
+    if not (
+        len(new_ends)
+        == len(new_names)
+        == len(monomer)
+        == len(periodicity)
+        == len(hor)
+        == n
+    ):
         raise ValueError("All lists in tuple_of_lists must have the same length.")
 
     # Group intervals by name, but treat None as unique per entry
     groups = {}  # key -> dict
     none_counter = 0
 
-    for s, e, name, m, p, h in zip(new_starts, new_ends, new_names, monomer, periodicity, hor):
+    for s, e, name, m, p, h in zip(
+        new_starts, new_ends, new_names, monomer, periodicity, hor
+    ):
         if name is None or name == "Unknown":
             none_counter += 1
             key = f"None_{none_counter}"  # unique row per None
@@ -455,7 +472,7 @@ def write_summary_file(tuple_of_lists, out_csv_path: str) -> None:
                 "monomer": m,
                 "periodicity": p,
                 "hor": h,
-                "intervals": []
+                "intervals": [],
             }
 
         groups[key]["intervals"].append((s, e))
@@ -463,17 +480,18 @@ def write_summary_file(tuple_of_lists, out_csv_path: str) -> None:
     # Write CSV
     with open(out_csv_path, "w", newline="") as f:
         writer = csv.DictWriter(
-            f,
-            fieldnames=["name", "monomer", "periodicity", "hor", "intervals"]
+            f, fieldnames=["name", "monomer", "periodicity", "hor", "intervals"]
         )
         writer.writeheader()
 
         for _, row in groups.items():
             intervals_str = ";".join(f"{s}-{e}" for s, e in row["intervals"])
-            writer.writerow({
-                "name": row["name"],
-                "monomer": row["monomer"],
-                "periodicity": row["periodicity"],
-                "hor": row["hor"],
-                "intervals": intervals_str
-            })
+            writer.writerow(
+                {
+                    "name": row["name"],
+                    "monomer": row["monomer"],
+                    "periodicity": row["periodicity"],
+                    "hor": row["hor"],
+                    "intervals": intervals_str,
+                }
+            )
