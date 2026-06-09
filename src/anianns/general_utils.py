@@ -11,7 +11,6 @@ from collections import Counter
 import numpy as np
 import re
 import matplotlib.pyplot as plt
-import seaborn as sns
 import csv
 
 from anianns.kmer_utils import (

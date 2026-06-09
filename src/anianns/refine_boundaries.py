@@ -881,7 +881,7 @@ def report_borders(
     window: int,
     k: int,
     df: pl.DataFrame,
-    classify: str | bool,
+    classify: "str | bool",
     verbose: bool,
     quiet: bool,
 ) -> None:

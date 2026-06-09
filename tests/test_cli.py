@@ -110,3 +110,44 @@ def test_main_annotate_writes_bed_and_summary(monkeypatch, tmp_path):
         rows = list(csv.DictReader(handle))
     assert rows[0]["name"] == "HSAT"
     assert rows[0]["intervals"] == "2-18"
+
+
+def test_validate_ntrprism_range_start_must_be_less_than_end():
+    # start == end
+    assert cli.validate_ntrprism_range(100, 100, 1000) is not None
+    # start > end
+    assert cli.validate_ntrprism_range(500, 100, 1000) is not None
+    # valid case: start < end within bounds
+    assert cli.validate_ntrprism_range(100, 500, 1000) is None
+
+
+def test_validate_ntrprism_range_out_of_bounds(monkeypatch, capsys):
+    # Range where end exceeds sequence length
+    assert cli.validate_ntrprism_range(0, 2000, 1000) is not None
+    # Range where start is negative
+    assert cli.validate_ntrprism_range(-1, 500, 1000) is not None
+
+    # Confirm main() exits with error when range is out of bounds for a real fasta
+    fasta_path = str(
+        Path(__file__).resolve().parents[1] / "sample_sequences" / "sample_hap1.fa"
+    )
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "anianns",
+            "ntrprism",
+            "-f",
+            fasta_path,
+            "-s",
+            "sample_hap1",
+            "--range",
+            "0",
+            "99999999",  # beyond the 14 000 000 bp sequence
+        ],
+    )
+    import pytest
+    with pytest.raises(SystemExit) as exc_info:
+        cli.main()
+    assert exc_info.value.code == 1
+    assert "[ERROR]" in capsys.readouterr().out

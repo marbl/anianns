@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "anianns"
-version = "0.6.0"
+version = "0.6.1"
 description = "A Python package for annotating large tandem repeats"
 authors = [
     { name="Alex Sweeten", email="alex.sweeten@nih.gov" }
@@ -24,10 +24,11 @@ dependencies = [
     "polars",
     "mmh3",
     "numba",
+    "seaborn",
 ]
 [project.optional-dependencies]
 moddotplot = ["moddotplot"]
-dev = ["black", "coverage", "jupyter", "ipykernel", "pytest", "pytest-cov", "biopython"]
+dev = ["black", "coverage", "jupyter", "ipykernel", "pytest", "pytest-cov", "biopython", "seaborn"]
 [project.scripts]
 anianns = "anianns.__main__:main"
 anianns_kmer_db = "anianns.build_kmer_db:main"
