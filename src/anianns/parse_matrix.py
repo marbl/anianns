@@ -105,7 +105,6 @@ def merge_shared_boundaries(intervals, prefix, window, verbose=True):
     """
     out = []  # list of (x, y, count)
 
-    # cache the conflict-check functions for faster lookup
     chk_same = check_same_start_end  # expects: (pairs_list, val, window, is_start)
     chk_cont = check_new_contained  # expects: (pairs_list, x, y) checks if new sequence is smaller
     chk_span = (

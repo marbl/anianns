@@ -352,19 +352,116 @@ def merge_close_values(pairs, tolerance=1):
     return result
 
 
-def plot_matrix(matrix, title="Matrix Plot", cmap="gray_r", show_colorbar=True):
+def plot_matrix(
+    matrix,
+    title="Matrix Plot",
+    cmap="gray_r",
+    show_colorbar=True,
+    dpi=72,
+    figsize=(6, 5),
+    save_path=None,
+    offset=1.0,
+    highlight_ranges=None,  # list of (xmin, xmax, ymin, ymax)
+):
+    import numpy as np
+    import matplotlib.pyplot as plt
+    from matplotlib.patches import Rectangle
+
     if not isinstance(matrix, np.ndarray):
         raise TypeError("Input must be a NumPy array")
     if matrix.ndim != 2:
         raise ValueError("Input must be a 2D matrix")
 
-    plt.imshow(matrix, cmap=cmap, aspect="auto", vmin=86)
-    plt.title(title)
-    plt.xlabel("Columns")
-    plt.ylabel("Rows")
+    fig, ax = plt.subplots(figsize=figsize, dpi=dpi)
+
+    im = ax.imshow(matrix, cmap=cmap, aspect="auto", vmin=86, interpolation="nearest")
+
+    ax.set_title(title)
+    ax.set_xlabel("Columns")
+    ax.set_ylabel("Rows")
+
+    # --- scale tick labels only ---
+    xticks = ax.get_xticks()
+    yticks = ax.get_yticks()
+
+    ax.set_xticks(xticks)
+    ax.set_yticks(yticks)
+    ax.set_xticklabels([f"{x * offset:.2f}" for x in xticks])
+    ax.set_yticklabels([f"{y * offset:.2f}" for y in yticks])
+
+    # --- multiple highlight regions ---
+    if highlight_ranges is not None:
+        for xmin, xmax, ymin, ymax in highlight_ranges:
+            # convert scaled values → indices
+            x0 = xmin / offset
+            x1 = xmax / offset
+            y0 = ymin / offset
+            y1 = ymax / offset
+
+            rect = Rectangle(
+                (x0, y0),
+                x1 - x0,
+                y1 - y0,
+                linewidth=2,
+                edgecolor="red",
+                facecolor="red",
+                alpha=0.3,
+            )
+            ax.add_patch(rect)
+
+        """# --- cross-region (off-diagonal) rectangles ---
+    if highlight_ranges is not None:
+        for i in range(len(highlight_ranges)):
+            for j in range(i + 1, len(highlight_ranges)):  # avoid duplicates
+
+                x1_min, x1_max, _, _ = highlight_ranges[i]
+                x2_min, x2_max, _, _ = highlight_ranges[j]
+
+                a1, b1 = x1_min, x1_max
+                a2, b2 = x2_min, x2_max
+
+                # ✅ ONLY allow strictly separated ranges
+                if not (b1 < a2 - 5 or b2 < a1 - 5):
+                    continue  # skip overlaps AND touching
+
+                # --- rectangle: (j on x-axis, i on y-axis)
+                x0 = a2 / offset
+                y0 = a1 / offset
+                width = (b2 - a2) / offset
+                height = (b1 - a1) / offset
+
+                rect = Rectangle(
+                    (x0, y0),
+                    width,
+                    height,
+                    linewidth=1.5,
+                    edgecolor="green",
+                    facecolor="green",
+                    alpha=0.2,
+                )
+                ax.add_patch(rect)
+
+                # --- optional symmetric rectangle
+                x0_sym = a1 / offset
+                y0_sym = a2 / offset
+
+                rect_sym = Rectangle(
+                    (x0_sym, y0_sym),
+                    (b1 - a1) / offset,
+                    (b2 - a2) / offset,
+                    linewidth=1.5,
+                    edgecolor="green",
+                    facecolor="green",
+                    alpha=0.2,
+                )
+                ax.add_patch(rect_sym)"""
 
     if show_colorbar:
-        plt.colorbar(label="Value")
+        plt.colorbar(im, ax=ax, label="Value")
+
+    plt.tight_layout()
+    if save_path:
+        plt.savefig(save_path, dpi=dpi, bbox_inches="tight")
 
     plt.show()
 

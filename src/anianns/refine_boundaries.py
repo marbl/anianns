@@ -299,9 +299,10 @@ def detect_precise_boundaries(
     window,
     k,
     coordinates,
-    verbose=False,
-    classify=False,
-    bordering=False,
+    verbose,
+    classify,
+    previous_coordinates,
+    interval=None,
 ):
     # Get the sequence of the specified region, subtracted by 1.5 * window size as a potential buffer region.
     interval = math.ceil(window / 2)
@@ -339,20 +340,21 @@ def detect_precise_boundaries(
             print(f"ntr_prism returned None for {coordinates}; removing region.\n")
         return None
 
+    # This survived the ntr_prism purge, find the boundary
     left_boundary = detect_left_boundary(
         fasta_file=fasta_file,
         array_seq=core_seq,
         array_seq_size=core_seq_size,
         seq_id=seq_id,
         boundary_point=coordinates[0],
-        limit=None,
         k=k,
         window=window,
         interval=interval,
         boundary_chunk_size=100,
         verbosity=verbose,
-        bordering=bordering,
+        prev_border_coordinate=previous_coordinates[1],
         boundary=0,
+        expanded=False,
     )
 
     right_boundary = detect_right_boundary(
@@ -367,7 +369,7 @@ def detect_precise_boundaries(
         interval=interval,
         boundary_chunk_size=100,
         verbosity=verbose,
-        bordering=bordering,
+        bordering=False,
         boundary=seq_len,
     )
 
@@ -419,27 +421,33 @@ def detect_left_boundary(
     array_seq_size,
     seq_id,
     boundary_point,
-    limit,
     k,
     window,
     interval,
     boundary_chunk_size,
-    verbosity=False,
-    bordering=False,
-    boundary=0,
+    verbosity,
+    prev_border_coordinate,
+    boundary,
+    expanded=False,
 ):
-    boundary_start = boundary_point - window - interval
-    # Ensure value is less than 0
+    boundary_start = boundary_point - window - (interval * 4)
+    # if prev_border_coordinate > (boundary_start - interval):
+    # print(f"Potential conflict as previous boundary at {prev_border_coordinate} close to {boundary_start}")
+
+    # Ensure the boundary start isn't less than 0
     if boundary_start < boundary:
         boundary_start = boundary
-    boundary_end = boundary_point + window + interval
+
+    boundary_end = boundary_point + window + (interval * 4)
     boundary_size = boundary_end - boundary_start
+
     border_seq = extract_region(
         fasta_file=fasta_file,
         chr=seq_id,
         region_start=boundary_start,
         region_end=boundary_end,
     )
+
     # Generate k-mers and convert to sets for faster operations
     array_kmers = generate_kmers_from_fasta(array_seq, k, True)
     border_kmers = generate_kmers_from_fasta(border_seq, k, True)
@@ -467,10 +475,57 @@ def detect_left_boundary(
 
     # Case where boundary needs to be extended to the left
     if last_nonzero_step <= 1:
-        if verbosity:
-            print("Boundary needs to be extended left. Likely an error\n")
+        if boundary_start <= window:
+            return boundary_start
+        else:
+            if verbosity:
+                print("Boundary needs to be extended left...\n")
 
-        return None
+            if not expanded:
+                return detect_left_boundary(
+                    fasta_file=fasta_file,
+                    array_seq=array_seq,
+                    array_seq_size=array_seq_size,
+                    seq_id=seq_id,
+                    boundary_point=boundary_start,  # This gets modified
+                    k=k,
+                    window=window,
+                    interval=interval,
+                    boundary_chunk_size=100,
+                    verbosity=verbosity,
+                    prev_border_coordinate=prev_border_coordinate,
+                    boundary=0,
+                    expanded=True,
+                )
+            else:
+                if prev_border_coordinate > boundary_point - window:
+                    prev_border_coordinate + 1
+                    return prev_border_coordinate + 1
+
+            """updated_boundary_start = int(boundary_start - (interval * 10))
+            updated_boundary_end = int(boundary_end + (interval * 10))
+            print(f"DDD {updated_boundary_start} - {updated_boundary_end}\n")
+            updated_boundary_size = updated_boundary_end - updated_boundary_start
+            updated_border_seq = extract_region(
+                fasta_file=fasta_file,
+                chr=seq_id,
+                region_start=updated_boundary_start,
+                region_end=updated_boundary_end,
+            )
+            updated_border_kmers = generate_kmers_from_fasta(updated_border_seq, k, True)
+            updated_border_kmer_list = list(
+                islice(updated_border_kmers, updated_boundary_size)
+            )
+            updated_steps = math.ceil(updated_boundary_size / 100)
+            last_nonzero_step = find_target_fixed_window_left(
+                array_kmer_set=array_kmer_set,
+                border_kmer_list=updated_border_kmer_list,
+                boundary_size=updated_boundary_size,
+                offset=updated_boundary_start,
+                verbose=verbosity,
+                step_size=updated_steps,
+            )
+            print("Testing") """
 
     # Case where boundary needs to be extended to the right
     elif last_nonzero_step >= steps - 1:
@@ -792,7 +847,9 @@ def find_target_fixed_window_right(
         label_line = "     " + left_label + (" " * spacing) + right_label
         print(label_line)
 
-        print(f"\nBoundary stop index: {last_nonzero_step}\n")
+        print(
+            f"\nBoundary stop index: {last_nonzero_step}, {offset + (step_size * last_nonzero_step)}\n"
+        )
 
     return last_nonzero_step
 
@@ -837,7 +894,7 @@ def report_borders(
     if not quiet:
         print(f"Inferring satellite locations & boundaries for {seq_id}...\n")
 
-    # Load k-mer DBs (for classification) and build supersets
+    # Load k-mer DBs (for classification) and build supersets (supersets_dict = classification dictionary)
     loaded_kmer_dbs = None
     if classify:
         loaded_kmer_dbs = load_all_kmer_dbs(classify)
@@ -876,6 +933,7 @@ def report_borders(
     monomer = []
     periodicity = []
     hor = []
+    previous_new_boundaries = []
 
     assert len(starts) == len(ends)
 
@@ -883,84 +941,89 @@ def report_borders(
     while i < len(starts):
         next_i = i + 1
         potential = ends[i] % band
+        previous_coordinates = (
+            previous_new_boundaries[-1] if previous_new_boundaries else (0, 1)
+        )
 
         # Band-border / wrap-around handling
+        # This code runs when the satellite boundary is by a band border
         if potential <= window * 3 or potential >= band - (window * 3):
             if verbose:
-                print(f"Band border region detected at end position {ends[i]}")
+                print(f"Estimated borders cross a border region: {ends[i]+1}\n")
             if next_i < len(starts):
                 # merge with next region
                 ends[i] = ends[next_i]
                 del starts[next_i]
                 del ends[next_i]
 
-            coordinates = (int(starts[i]), int(ends[i]))
+            coordinates = (int(starts[i]) + 1, int(ends[i]) + 1)
             try:
                 updated_boundaries = detect_precise_boundaries(
-                    fa, seq_id, seq_len, window, k, coordinates, verbose, supersets_dict
+                    fasta_file=fa,
+                    seq_id=seq_id,
+                    seq_len=seq_len,
+                    window=window,
+                    k=k,
+                    coordinates=coordinates,
+                    verbose=verbose,
+                    classify=supersets_dict,
+                    previous_coordinates=previous_coordinates,
                 )
                 if verbose:
                     print(
                         f"Estimated new boundaries: {updated_boundaries[0]}-{updated_boundaries[1]}"
                     )
+                # Various appendages
                 new_starts.append(updated_boundaries[0])
                 new_ends.append(updated_boundaries[1])
                 classification.append(updated_boundaries[2])
                 monomer.append(updated_boundaries[3][0])
                 periodicity.append(updated_boundaries[3][2])
                 hor.append(updated_boundaries[3][3])
+                previous_new_boundaries.append(
+                    (updated_boundaries[0], updated_boundaries[1])
+                )
             except Exception as e:
                 if verbose:
-                    print(f"Error occurred while updating boundaries: {e}")
+                    print(
+                        f"Error occurred while updating boundaries at {coordinates} (merged border region): {e}"
+                    )
             # Do not increment i, as the next region is now at the same index
 
+        # This code runs if not by a band border
         else:
-            # If adjacent/nearby regions, attempt to resolve them together
-            if next_i < len(starts) and abs(ends[i] - starts[next_i]) <= 4 * window:
-                coordinates = (int(starts[i]), int(ends[i]))
-                try:
-                    updated_boundaries = detect_precise_boundaries(
-                        fa,
-                        seq_id,
-                        seq_len,
-                        window,
-                        k,
-                        coordinates,
-                        verbose,
-                        supersets_dict,
-                    )
-                    if verbose:
-                        print(
-                            f"Estimated new boundaries: {updated_boundaries[0]}-{updated_boundaries[1]}"
-                        )
-                    new_starts.append(updated_boundaries[0])
-                    new_ends.append(updated_boundaries[1])
-                    classification.append(updated_boundaries[2])
-                    monomer.append(updated_boundaries[3][0])
-                    periodicity.append(updated_boundaries[3][2])
-                    hor.append(updated_boundaries[3][3])
-                except Exception as e:
-                    if verbose:
-                        print(f"Error occurred while updating boundaries: {e}")
-            else:
-                # Single region handling
-                coordinates = (int(starts[i]), int(ends[i]))
+            coordinates = (int(starts[i]) + 1, int(ends[i]) + 1)
+            try:
                 updated_boundaries = detect_precise_boundaries(
-                    fa, seq_id, seq_len, window, k, coordinates, verbose, supersets_dict
+                    fasta_file=fa,
+                    seq_id=seq_id,
+                    seq_len=seq_len,
+                    window=window,
+                    k=k,
+                    coordinates=coordinates,
+                    verbose=verbose,
+                    classify=supersets_dict,
+                    previous_coordinates=previous_coordinates,
                 )
-                if not updated_boundaries:
-                    if verbose:
-                        print(f"Unable to resolve boundaries {coordinates}. ")
-                    # new_starts.append(int(starts[i]))
-                    # new_ends.append(int(starts[i]))
-                    # classification.append("Unknown")
-                else:
-                    new_starts.append(updated_boundaries[0])
-                    new_ends.append(updated_boundaries[1])
-                    classification.append(updated_boundaries[2])
-                    monomer.append(updated_boundaries[3][0])
-                    periodicity.append(updated_boundaries[3][2])
-                    hor.append(updated_boundaries[3][3])
+                if verbose:
+                    print(
+                        f"Estimated new boundaries: {updated_boundaries[0]}-{updated_boundaries[1]}"
+                    )
+                # Various appendages
+                new_starts.append(updated_boundaries[0])
+                new_ends.append(updated_boundaries[1])
+                classification.append(updated_boundaries[2])
+                monomer.append(updated_boundaries[3][0])
+                periodicity.append(updated_boundaries[3][2])
+                hor.append(updated_boundaries[3][3])
+                previous_new_boundaries.append(
+                    (updated_boundaries[0], updated_boundaries[1])
+                )
+            except Exception as e:
+                if verbose:
+                    print(
+                        f"Error occurred while updating boundaries at {coordinates} (non-border region): {e}"
+                    )
 
             if verbose:
                 print("--------------------------------------------------\n")

@@ -129,7 +129,7 @@ def sobel(M):
     return binary_edges
 
 
-def sobel_edges(M, thresh=0.6):
+def sobel_edges(M, thresh=0.6, plot=True):
     """Return binary Sobel edge map."""
     sobel_x = ndimage.sobel(M, axis=1)
     sobel_y = ndimage.sobel(M, axis=0)
@@ -138,17 +138,283 @@ def sobel_edges(M, thresh=0.6):
     if mx > 0:
         sobel_mag = sobel_mag / mx
     binary_edges = sobel_mag > thresh
+    if plot:
+        dpi = 300
+        figsize = (12, 10)
+        plt.figure(figsize=figsize, dpi=dpi)
+        plt.imshow(binary_edges, cmap="gray_r")
+        plt.title("Sobel Edge Magnitude")
+        plt.colorbar()
+
+        plt.show()
     return binary_edges
 
 
+def sobel_edges2(M, thresh=0.4, plot=True, highlight_ranges=None, offset=1.0):
+    """Return binary Sobel edge map with optional highlighted regions."""
+    import numpy as np
+    import matplotlib.pyplot as plt
+    from scipy import ndimage
+    from matplotlib.patches import Rectangle
+
+    sobel_x = ndimage.sobel(M, axis=1)
+    sobel_y = ndimage.sobel(M, axis=0)
+    sobel_mag = np.hypot(sobel_x, sobel_y)
+
+    mx = np.max(sobel_mag)
+    if mx > 0:
+        sobel_mag = sobel_mag / mx
+
+    binary_edges = sobel_mag > thresh
+
+    if plot:
+        dpi = 300
+        figsize = (12, 10)
+
+        fig, ax = plt.subplots(figsize=figsize, dpi=dpi)
+        im = ax.imshow(binary_edges, cmap="gray_r")
+
+        ax.set_title("Sobel Edge Magnitude")
+
+        # --- optional: scale tick labels ---
+        xticks = ax.get_xticks()
+        yticks = ax.get_yticks()
+
+        ax.set_xticks(xticks)
+        ax.set_yticks(yticks)
+        ax.set_xticklabels([f"{x * offset:.2f}" for x in xticks])
+        ax.set_yticklabels([f"{y * offset:.2f}" for y in yticks])
+
+        # --- draw red highlight boxes ---
+        if highlight_ranges is not None:
+            for xmin, xmax, ymin, ymax in highlight_ranges:
+                x0 = xmin / offset
+                y0 = ymin / offset
+                width = (xmax - xmin) / offset
+                height = (ymax - ymin) / offset
+
+                rect = Rectangle(
+                    (x0, y0),
+                    width,
+                    height,
+                    linewidth=2,
+                    edgecolor="red",
+                    facecolor="red",
+                    alpha=0.3,
+                )
+                ax.add_patch(rect)
+
+        plt.colorbar(im, ax=ax)
+        plt.tight_layout()
+        plt.show()
+
+    return binary_edges
+
+
+def sobel_edges3(M, thresh=0.4, plot=True, highlight_ranges=None, offset=1.0):
+    """Return binary Sobel edge map with optional highlighted regions."""
+    import numpy as np
+    import matplotlib.pyplot as plt
+    from scipy import ndimage
+    from matplotlib.patches import Rectangle
+
+    sobel_x = ndimage.sobel(M, axis=1)
+    sobel_y = ndimage.sobel(M, axis=0)
+    sobel_mag = np.hypot(sobel_x, sobel_y)
+
+    mx = np.max(sobel_mag)
+    if mx > 0:
+        sobel_mag = sobel_mag / mx
+
+    binary_edges = sobel_mag > thresh
+
+    if plot:
+        dpi = 300
+        figsize = (12, 10)
+
+        fig, ax = plt.subplots(figsize=figsize, dpi=dpi)
+        im = ax.imshow(binary_edges, cmap="gray_r")
+
+        ax.set_title("Sobel Edge Magnitude")
+
+        # --- optional: scale tick labels ---
+        xticks = ax.get_xticks()
+        yticks = ax.get_yticks()
+
+        ax.set_xticks(xticks)
+        ax.set_yticks(yticks)
+        ax.set_xticklabels([f"{x * offset:.2f}" for x in xticks])
+        ax.set_yticklabels([f"{y * offset:.2f}" for y in yticks])
+
+        # --- draw red highlight boxes ---
+        if highlight_ranges is not None:
+            for xmin, xmax, ymin, ymax in highlight_ranges:
+                x0 = xmin / offset
+                y0 = ymin / offset
+                width = (xmax - xmin) / offset
+                height = (ymax - ymin) / offset
+
+                rect = Rectangle(
+                    (x0, y0),
+                    width,
+                    height,
+                    linewidth=2,
+                    edgecolor="green",
+                    facecolor="green",
+                    alpha=0.3,
+                )
+                ax.add_patch(rect)
+
+        plt.colorbar(im, ax=ax)
+        plt.tight_layout()
+        plt.show()
+
+    return binary_edges
+
+
+def _march_until_hit(binary_edges, y0, x0, dy, dx):
+    """
+    March from (y0, x0) in direction (dy, dx) until the first True pixel.
+
+    Returns
+    -------
+    tuple
+        ((y, x), hit_found) where (y, x) is either the first hit coordinate
+        or the last in-bounds coordinate reached if no hit is found.
+    """
+    h, w = binary_edges.shape
+    y, x = y0, x0
+
+    while True:
+        ny = y + dy
+        nx = x + dx
+        if ny < 0 or ny >= h or nx < 0 or nx >= w:
+            return (y, x), False
+        if binary_edges[ny, nx]:
+            return (ny, nx), True
+        y, x = ny, nx
+
+
+def probe_diagonal_rays(binary_edges):
+    """
+    For each diagonal position (i, i), shoot rays up/down/left/right and
+    report the first hit in each direction.
+
+    If no hit is found in a direction, the returned coordinate is the last
+    in-bounds position reached along that ray.
+    """
+    h, w = binary_edges.shape
+    n = min(h, w)
+    reports = []
+
+    for i in range(n):
+        up, up_hit = _march_until_hit(binary_edges, i, i, -1, 0)
+        down, down_hit = _march_until_hit(binary_edges, i, i, 1, 0)
+        left, left_hit = _march_until_hit(binary_edges, i, i, 0, -1)
+        right, right_hit = _march_until_hit(binary_edges, i, i, 0, 1)
+
+        reports.append(
+            {
+                "diag_index": i,
+                "origin": (i, i),
+                "up": up,
+                "down": down,
+                "left": left,
+                "right": right,
+                "up_hit": up_hit,
+                "down_hit": down_hit,
+                "left_hit": left_hit,
+                "right_hit": right_hit,
+            }
+        )
+
+    return reports
+
+
+def find_diagonal_bisecting_squares(
+    M, thresh=0.6, min_span=1, square_tol=0, plot=False, edge_map=None
+):
+    """
+    Find square-like boxes that bisect the diagonal by ray-casting from each
+    diagonal coordinate.
+
+    For each diagonal point, the candidate box is defined by the first hit
+    upward, downward, leftward, and rightward. A box is reported only when all
+    four rays hit an edge and the resulting height/width differ by at most
+    ``square_tol``.
+    """
+    if edge_map is not None:
+        edges = np.asarray(edge_map, dtype=bool)
+    else:
+        arr = np.asarray(M)
+        if arr.dtype == np.bool_:
+            edges = arr
+        else:
+            edges = sobel_edges(arr, thresh=thresh, plot=False)
+
+    reports = probe_diagonal_rays(edges)
+    squares = []
+    seen = set()
+
+    for report in reports:
+        if not all(
+            report[key] for key in ("up_hit", "down_hit", "left_hit", "right_hit")
+        ):
+            continue
+
+        diag_index = report["diag_index"]
+        top = report["up"][0]
+        bottom = report["down"][0]
+        left = report["left"][1]
+        right = report["right"][1]
+
+        height = bottom - top
+        width = right - left
+
+        if height < min_span or width < min_span:
+            continue
+        if abs(height - width) > square_tol:
+            continue
+        if not (top < diag_index < bottom and left < diag_index < right):
+            continue
+
+        square = (top, left, bottom, right)
+        if square not in seen:
+            seen.add(square)
+            squares.append(square)
+
+    if plot:
+        plt.figure(figsize=(8, 8))
+        plt.imshow(edges, cmap="gray_r", interpolation="nearest")
+        ax = plt.gca()
+
+        for top, left, bottom, right in squares:
+            ax.add_patch(
+                plt.Rectangle(
+                    (left, top),
+                    right - left,
+                    bottom - top,
+                    edgecolor="cyan",
+                    facecolor="none",
+                    lw=2,
+                )
+            )
+
+        plt.title("Diagonal-Bisecting Squares")
+        plt.tight_layout()
+        plt.show()
+
+    return reports, squares
+
+
 def find_offdiag_rectangles(
-    M, thresh=0.6, band=5, connectivity=2, min_height=1, min_width=1, plot=True
+    M, thresh=0.4, band=5, connectivity=2, min_height=1, min_width=1, plot=True
 ):
     """
     Find bounding boxes for connected components that do NOT intersect
     a diagonal band |row-col| <= band. Returns list of (y0, x0, y1, x1).
     """
-    edges = sobel_edges(M, thresh=thresh)
+    edges = sobel_edges(M, thresh=thresh, plot=plot)
     H, W = edges.shape
 
     # Connected components on the full edge map

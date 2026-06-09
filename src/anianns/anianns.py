@@ -8,6 +8,7 @@ import json
 import os
 import pysam
 import math
+import numpy as np
 
 from anianns.ani_matrix import intersection_matrix, intersection_matrix_inverted
 
@@ -64,6 +65,19 @@ def mask_type(value):
         return value
 
 
+def validate_ntrprism_range(start, end, seq_len):
+    """
+    Validate the --range argument for the ntrprism subcommand.
+
+    Returns an error message string on failure, or None on success.
+    """
+    if start >= end:
+        return f"[ERROR] --range start ({start}) must be less than end ({end})."
+    if start < 0 or end > seq_len:
+        return f"[ERROR] --range ({start}, {end}) is out of bounds for sequence of length {seq_len}."
+    return None
+
+
 def get_parser():
     """
     Argument parsing for stand-alone runs.
@@ -74,7 +88,7 @@ def get_parser():
         description=DESCRIPTION,
     )
     subparsers = parser.add_subparsers(
-        dest="command", help="Choose mode: annotate or mask"
+        dest="command", help="Choose mode: annotate, build_db, ntrprism"
     )
     annotate_parser = subparsers.add_parser(
         "annotate",
@@ -83,6 +97,10 @@ def get_parser():
     build_db_parser = subparsers.add_parser(
         "build_db",
         help="Takes input fasta(s), bedfile(s) of known satellite coordinates, and a config file, and outputs a kme db (directory).",
+    )
+    ntrprism_parser = subparsers.add_parser(
+        "ntrprism",
+        help="Takes input fasta(s) plus regions of interest, outputs ntrprism k-mer spectra.",
     )
     annotate_parser.add_argument(
         "-f",
@@ -225,6 +243,31 @@ def get_parser():
         "--quiet",
         action="store_true",
         help="Suppress all logging output and text.",
+    )
+
+    ntrprism_parser.add_argument(
+        "-f",
+        "--fasta",
+        default=argparse.SUPPRESS,
+        help="Path to input fasta file(s).",
+        required=True,
+        nargs="+",
+    )
+    ntrprism_parser.add_argument(
+        "-s",
+        "--seq_id",
+        nargs="+",
+        default=None,
+        help="Sequence ID to extract (multiple if using multifasta file). Will ignore if not found.",
+    )
+    ntrprism_parser.add_argument(
+        "-r",
+        "--range",
+        default=None,
+        type=int,
+        nargs=2,
+        metavar=("START", "END"),
+        help="Genomic range as two integers (start end). If omitted, the full sequence is used.",
     )
 
     return parser
@@ -500,14 +543,34 @@ def main():
                             print(spans)"""
                             if args.plot:
                                 plot_matrix(inv)
+                                os.makedirs(directory, exist_ok=True)
+                                matrix_filename = os.path.join(
+                                    directory, f"{seq_id}_{w}_matrix.npy"
+                                )
+                                np.save(matrix_filename, inv)
+                                if not args.quiet:
+                                    print(f"Saved matrix to {matrix_filename}")
                             # sys.exit(0)
                             # plot_matrix(inv)
                             # sob = sobel_with_diagonal_probes(inv, thresh=0.7, min_thick=1)
                             # plot_matrix(sob)
                             M_diag, M_distal = split_diagonal_attached(inv)
+                            if args.plot:
+                                diag_filename = os.path.join(
+                                    directory, f"{seq_id}_diag_{w}_matrix.npy"
+                                )
+                                np.save(diag_filename, M_diag)
+                                distal_filename = os.path.join(
+                                    directory, f"{seq_id}_distal_{w}_matrix.npy"
+                                )
+                                np.save(distal_filename, M_distal)
 
                             new_spans = get_span(updated_matrix, win, zero_tol=2)
                             prefix_amount = band_height * (w - 1)
+
+                            # print(new_spans)
+                            if args.verbose:
+                                print("----------------------------------------------")
 
                             """if verbosity:
                                 print(f"Current prefix: {prefix_amount}\n")"""
@@ -586,6 +649,7 @@ def main():
                         else:
                             filtered.append((x, y, count))
                     satellite_coordinate_list = filtered
+                    # print(satellite_coordinate_list)
                     # sys.exit(0)
                     if seq_bounds:
                         # seq_bounds[0] is the name seq_bounds[1] is the start offset, 2 is the end offset
@@ -764,3 +828,45 @@ def main():
 
         except Exception as e:
             print(e)
+
+    # -------- NTRPRISM LOGIC --------#
+    elif args.command == "ntrprism":
+        if args.range is not None:
+            start, end = args.range
+            for fasta_path in args.fasta:
+                fh = pysam.FastaFile(fasta_path)
+                seq_ids = args.seq_id if args.seq_id else fh.references
+                for seq_id in seq_ids:
+                    seq_len = fh.get_reference_length(seq_id)
+                    error = validate_ntrprism_range(start, end, seq_len)
+                    if error:
+                        print(error)
+                        sys.exit(1)
+                fh.close()
+
+            headers = get_input_headers(args.fasta)
+        if args.seq_id:
+            pairs = []
+            for sid in args.seq_id:
+                matches = [f for f, ids in headers if sid in ids]
+                if matches:
+                    pairs.append((matches[0], [sid]))
+                else:
+                    # Check if there's sequence bounds for this seq_id
+                    seq_bounds = define_bounds(sid)
+                    if seq_bounds:
+                        # print(seq_bounds)
+                        matches = [f for f, ids in headers if seq_bounds[0] in ids]
+                        if matches:
+                            pairs.append((matches[0], [sid]))
+                        else:
+                            if not args.quiet:
+                                print(f"Unable to locate {seq_bounds}. Skipping…")
+                    else:
+                        if not args.quiet:
+                            print(f"Unable to locate {sid}. Skipping…")
+        else:
+            pairs = headers
+
+        # 3) Open all FASTAs once
+        fasta_handles = {f: pysam.FastaFile(f) for f, _ in pairs}
