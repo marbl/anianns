@@ -28,7 +28,7 @@ dependencies = [
 ]
 [project.optional-dependencies]
 moddotplot = ["moddotplot"]
-dev = ["black", "coverage", "jupyter", "ipykernel", "pytest", "pytest-cov", "biopython"]
+dev = ["black", "coverage", "jupyter", "ipykernel", "pytest", "pytest-cov", "biopython", "seaborn"]
 [project.scripts]
 anianns = "anianns.__main__:main"
 anianns_kmer_db = "anianns.build_kmer_db:main"
