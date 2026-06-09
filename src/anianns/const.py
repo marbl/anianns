@@ -1,5 +1,6 @@
 import struct
-ASCII_ART = """
+
+ASCII_ART = r"""
                                                  __       __
      _          _     _                        .'  `'._.'`  '.
     / \   _ __ (_)   / \   _ __  _ __  ' ___  |  .--;   ;--.  | 
@@ -25,5 +26,4 @@ BED_COLUMNS = [
 DESCRIPTION = "Ani Ann's: ANI Inferred ANNotation of Tandem Repeats"
 HEADER_FORMAT = "32sQ"  # 32-byte name (padded), 8-byte unsigned int (number of kmers)
 HEADER_SIZE = struct.calcsize(HEADER_FORMAT)
-VERSION = "0.5.0"
-
+VERSION = "0.6.0"

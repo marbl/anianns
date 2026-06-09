@@ -5,6 +5,14 @@ import numpy as np
 
 tab_b = bytes.maketrans(b"ACTG", b"TGAC")
 
+
+def _progress_settings(n: int, k: int):
+    total_kmers = n - k + 1
+    if total_kmers <= 0:
+        return 0, 1
+    return total_kmers, max(1, round(n / 77))
+
+
 def remove_ambiguous_bases(mod_list, k):
     # Ambiguous IUPAC codes
     bases_to_remove = ["R", "Y", "M", "K", "S", "W", "H", "B", "V", "D", "N"]
@@ -17,8 +25,10 @@ def remove_ambiguous_bases(mod_list, k):
     mod_set.difference_update(kmers_to_remove)
     return mod_set
 
+
 def convert_set_list_to_sorted_arrays(set_list):
     return [np.array(sorted(s), dtype=np.int32) for s in set_list]
+
 
 def build_kmer_sets(kmer_list, max_len, window, interval, prepend=None):
     non_sets = []
@@ -38,13 +48,16 @@ def build_kmer_sets(kmer_list, max_len, window, interval, prepend=None):
 
         # build your sets in one pass each, remove 0 k-mers
         non_sets.append({x for x in seq_non if x % 4 == 0 and x != 0})
-        overlap_sets.append({x for x in kmer_list[ostart:oend] if x % 4 == 0 and x != 0})
+        overlap_sets.append(
+            {x for x in kmer_list[ostart:oend] if x % 4 == 0 and x != 0}
+        )
 
     # return exactly as before (overlap first, then non-overlap)
     return (
         convert_set_list_to_sorted_arrays(overlap_sets),
         convert_set_list_to_sorted_arrays(non_sets),
     )
+
 
 def read_sequence_kmers_from_file(
     filename: str, seqid: str, ksize: int, quiet: bool
@@ -67,23 +80,25 @@ def read_sequence_kmers_from_file(
 
 def generate_kmers_from_fasta(seq: Sequence[str], k: int, quiet: bool) -> Iterable[int]:
     n = len(seq)
+    total_kmers, progress_thresholds = _progress_settings(n, k)
+    if total_kmers <= 0:
+        return
     if not quiet:
-        progress_thresholds = round(n / 77)
         print_progress_bar(
-            0, n - k + 1, prefix="Progress:", suffix="Complete", length=40
+            0, total_kmers, prefix="Progress:", suffix="Complete", length=40
         )
 
     bases_to_remove = ["R", "Y", "M", "K", "S", "W", "H", "B", "V", "D", "N"]
-    for i in range(n - k + 1):
+    for i in range(total_kmers):
         if not quiet:
             if i % progress_thresholds == 0:
                 print_progress_bar(
-                    i, n - k + 1, prefix="Progress:", suffix="Complete", length=40
+                    i, total_kmers, prefix="Progress:", suffix="Complete", length=40
                 )
-            if i == n - k:
+            if i == total_kmers - 1:
                 print_progress_bar(
-                    n - k + 1,
-                    n - k + 1,
+                    total_kmers,
+                    total_kmers,
                     prefix="Progress:",
                     suffix="Completed",
                     length=40,
@@ -93,7 +108,7 @@ def generate_kmers_from_fasta(seq: Sequence[str], k: int, quiet: bool) -> Iterab
         # Skip kmer if it contains any ambiguous base
         if any(base in kmer for base in bases_to_remove):
             yield 0
-            
+
         else:
             fh = mmh3.hash(kmer, seed=42)
 
@@ -107,29 +122,31 @@ def generate_kmers_from_fasta_forward_only(
     seq: Sequence[str], k: int, quiet: bool
 ) -> Iterable[int]:
     n = len(seq)
+    total_kmers, progress_thresholds = _progress_settings(n, k)
+    if total_kmers <= 0:
+        return
     if not quiet:
-        progress_thresholds = round(n / 77)
         print_progress_bar(
-            0, n - k + 1, prefix="Progress:", suffix="Complete", length=40
+            0, total_kmers, prefix="Progress:", suffix="Complete", length=40
         )
 
-    for i in range(n - k + 1):
+    for i in range(total_kmers):
         if not quiet:
             if i % progress_thresholds == 0:
                 print_progress_bar(
-                    i, n - k + 1, prefix="Progress:", suffix="Complete", length=40
+                    i, total_kmers, prefix="Progress:", suffix="Complete", length=40
                 )
-            if i == n - k:
+            if i == total_kmers - 1:
                 print_progress_bar(
-                    n - k + 1,
-                    n - k + 1,
+                    total_kmers,
+                    total_kmers,
                     prefix="Progress:",
                     suffix="Completed",
                     length=40,
                 )
         # Remove case sensitivity
         kmer = seq[i : i + k].upper()
-        fh = kmer
+        fh = mmh3.hash(kmer, seed=42)
 
         yield fh
 
@@ -138,22 +155,24 @@ def generate_kmers_from_fasta_reverse_only(
     seq: Sequence[str], k: int, quiet: bool
 ) -> Iterable[int]:
     n = len(seq)
+    total_kmers, progress_thresholds = _progress_settings(n, k)
+    if total_kmers <= 0:
+        return
     if not quiet:
-        progress_thresholds = round(n / 77)
         print_progress_bar(
-            0, n - k + 1, prefix="Progress:", suffix="Complete", length=40
+            0, total_kmers, prefix="Progress:", suffix="Complete", length=40
         )
 
-    for i in range(n - k + 1):
+    for i in range(total_kmers):
         if not quiet:
             if i % progress_thresholds == 0:
                 print_progress_bar(
-                    i, n - k + 1, prefix="Progress:", suffix="Complete", length=40
+                    i, total_kmers, prefix="Progress:", suffix="Complete", length=40
                 )
-            if i == n - k:
+            if i == total_kmers - 1:
                 print_progress_bar(
-                    n - k + 1,
-                    n - k + 1,
+                    total_kmers,
+                    total_kmers,
                     prefix="Progress:",
                     suffix="Completed",
                     length=40,
