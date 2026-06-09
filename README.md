@@ -10,11 +10,13 @@
   - [Annotate Mode](#annotate-mode)
     - [Required args](#required-args)
     - [Optional args](#optional-args)
+    - [Sample run](#sample-run)
     - [Repeat Masking](#repeat-masking)
   - [Build db](#build-db)
     - [Required args](#required-args-1)
     - [Optional Arguments](#optional-arguments)
     - [Sample database](#sample-database)
+  - [NTRPrism](#ntrprism)
 - [Questions](#questions)
 
 
@@ -74,9 +76,11 @@ usage: anianns [-h] {annotate,build_db} ...
 Ani Ann's: ANI Inferred ANNotation of Tandem Repeats
 
 positional arguments:
-  {annotate,build_db}  Choose mode: annotate or build_db
+  {annotate,build_db,ntrprism}  Choose mode: annotate, build_db, ntrprism
     annotate           Takes an input fasta and outputs an annotated bedfile of satellite arrays.
     build_db           Takes an input fasta, a bedfile of satellite coordinates, and an optional config file and outputs a db of satellite k-mers.
+    ntrprism           Takes an input fasta, and a bedfile or region. Outputs k-mer histogram.
+
 
 options:
   -h, --help       show this help message and exit
@@ -166,6 +170,46 @@ Verbose logging output. Creates a log file at `--directory`. **Default: None.**
 
 Suppress all logging output. **Default: None.**
 
+#### Sample run
+
+`anianns -f sample_sequences/sample_hap1_.fa`
+
+Upon running the above command, you should see the following output in `sample_hap1.bed`:
+
+```
+#chrom	start	end	name	score	strand	thickStart	thickEnd	itemRgb
+sample_hap1	67078	407613	147	.	67078	407613	230,57,70
+sample_hap1	634567	669509	5	.	634567	669509	42,157,143
+sample_hap1	669978	1148691	68	.	669978	1148691	241,196,15
+sample_hap1	1148878	1472729	5	.	1148878	1472729	42,157,143
+sample_hap1	1472778	2702615	42	.	1472778	2702615	138,43,226
+sample_hap1	2703054	2729531	68	.	2703054	2729531	241,196,15
+sample_hap1	2729678	2834698	5	.	2729678	2834698	42,157,143
+sample_hap1	3044365	3208742	147	.	3044365	3208742	230,57,70
+sample_hap1	3225177	3297021	48	.	3225177	3297021	30,144,255
+```
+
+This is a BED file containing inferred satellite intervals. The value in the `score` column indicates the periodicity of the satellite array. Since no k-mer database was used, _AniAnn's_ does not attempt to classify each array. _AniAnn's_ will label arrays it determines to be related as the same color in `itemRgb`.
+
+To classify each line of the BED file into a known satellite array, a database of _k_-mers must be used. See [creating an annotation database](#creating-an-annotation-database) for more information. We will use the following provided _k_-mer db for our sample run:
+
+`anianns -f sample_sequences/sample_hap1.fa --classify sample_sequences/sample_kmer_db`
+
+```
+#chrom	start	end	name	score	strand	thickStart	thickEnd	itemRgb
+sample_hap1	67078	407613	ACRO	147	.	67078	407613	230,57,70
+sample_hap1	634567	669509	HSat3	5	.	634567	669509	42,157,143
+sample_hap1	669978	1148691	bSat	68	.	669978	1148691	241,196,15
+sample_hap1	1148878	1472729	HSat3	5	.	1148878	1472729	42,157,143
+sample_hap1	1472778	2702615	HSat1A	42	.	1472778	2702615	138,43,226
+sample_hap1	2703054	2729531	bSat	68	.	2703054	2729531	241,196,15
+sample_hap1	2729678	2834698	HSat3	5	.	2729678	2834698	42,157,143
+sample_hap1	3044365	3208742	ACRO	147	.	3044365	3208742	230,57,70
+sample_hap1	3225177	3297021	CER	48	.	3225177	3297021	30,144,255
+```
+
+Note that you *must* use the default k-mer value as the classification database. The default _k_ = 21 
+
 #### Repeat Masking
 
 ```
@@ -251,6 +295,10 @@ head config/sample_config.json
 This merges the _k_-mers of all variations of gSat into the same class. Anything not in the config file is not included in the *k*-mer db. The config file must be in standard JSON format. If a config file is not provided, each unique value in column 4 of the input bed file will become its own unique class. 
 
 Creating a *k*-mer db for HG002 using the provided config file takes around 3 minutes. This results in 16.9 million unique _k_-mers, compressed down into a 53mb directory. Note that increasing the *k*-mer size will increase the directory size, as a more specific *k*-mer threshold will increase the total number of unique *k*-mers.
+
+### NTRPrism
+
+Feature coming soon!
 
 ## Questions
 
