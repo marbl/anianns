@@ -1,8 +1,12 @@
 from collections import defaultdict
-import seaborn as sns
 from scipy import ndimage
 import matplotlib.pyplot as plt
 import numpy as np
+
+try:
+    import seaborn as sns
+except ImportError:
+    sns = None
 
 
 # Function mapping colors to elements in the DSU
@@ -25,12 +29,17 @@ def assign_colors(items, palette_name="tab20"):
     unique_items = list(dict.fromkeys(items))  # preserves order & uniqueness
     n = len(unique_items)
 
-    # Get a palette with at least n colors; fall back to 'husl' if n is large
-    if n <= 20:
-        palette = sns.color_palette(palette_name, n)
+    # Prefer seaborn palettes when available.
+    if sns is not None:
+        if n <= 20:
+            palette = sns.color_palette(palette_name, n)
+        else:
+            # HUSL gives well-separated colors for large n.
+            palette = sns.color_palette("husl", n)
     else:
-        # HUSL gives well-separated colors for large n
-        palette = sns.color_palette("husl", n)
+        cmap_name = "tab20" if n <= 20 else "hsv"
+        cmap = plt.get_cmap(cmap_name)
+        palette = [cmap(i / max(1, n - 1))[:3] for i in range(n)]
 
     # Map each unique item to a color
     color_map = dict(zip(unique_items, palette))
