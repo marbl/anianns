@@ -129,7 +129,7 @@ def test_validate_ntrprism_range_out_of_bounds(monkeypatch, capsys):
 
     # Confirm main() exits with error when range is out of bounds for a real fasta
     fasta_path = str(
-        Path(__file__).resolve().parents[1] / "test_data" / "chr13_maternal_short.fa"
+        Path(__file__).resolve().parents[1] / "sample_sequences" / "sample_hap1.fa"
     )
     monkeypatch.setattr(
         sys,
@@ -140,7 +140,7 @@ def test_validate_ntrprism_range_out_of_bounds(monkeypatch, capsys):
             "-f",
             fasta_path,
             "-s",
-            "chr13_MATERNAL:1-14000000",
+            "sample_hap1",
             "--range",
             "0",
             "99999999",  # beyond the 14 000 000 bp sequence
