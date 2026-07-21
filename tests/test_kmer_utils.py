@@ -42,6 +42,19 @@ def test_build_kmer_sets_creates_overlap_and_non_overlap_windows():
     assert [arr.tolist() for arr in non_overlap] == [[4, 24], [8, 12]]
 
 
+def test_build_kmer_sets_supports_denser_modulo_two_sketches():
+    overlap, non_overlap = build_kmer_sets(
+        kmer_list=[0, 2, 4, 6, 8, 10],
+        max_len=3,
+        window=2,
+        interval=1,
+        sketch=2,
+    )
+
+    assert [arr.tolist() for arr in overlap] == [[2, 4], [2, 4, 6, 8]]
+    assert [arr.tolist() for arr in non_overlap] == [[2], [4, 6]]
+
+
 def test_generate_kmers_handles_reverse_complements_and_ambiguous_bases():
     seq = "ACTGN"
     kmers = list(generate_kmers_from_fasta(seq, k=4, quiet=True))

@@ -114,6 +114,22 @@ def test_extract_region_returns_sequence_and_handles_errors(monkeypatch, capsys)
     assert "Error fetching region" in capsys.readouterr().out
 
 
+def test_extract_region_reuses_an_open_fasta_without_closing_it():
+    class OpenFasta:
+        def __init__(self):
+            self.closed = False
+
+        def fetch(self, chrom, start, end):
+            return f"{chrom}:{start}-{end}"
+
+        def close(self):
+            self.closed = True
+
+    fasta = OpenFasta()
+    assert extract_region(fasta, "chr1", 1, 10) == "chr1:1-10"
+    assert fasta.closed is False
+
+
 def test_extract_regions_and_histograms_by_name(monkeypatch):
     df = pl.DataFrame(
         {

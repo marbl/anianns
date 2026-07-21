@@ -168,7 +168,7 @@ def extract_region(fasta_file, chr, region_start, region_end):
     Extract a sequence from a FASTA file using 1-based coordinates (inclusive).
 
     Args:
-        fasta_file (str): Path to the FASTA file (indexed with .fai).
+        fasta_file: Path to an indexed FASTA, or an open ``pysam.FastaFile``.
         chr (str): Chromosome or contig name.
         region_start (int): 1-based start coordinate.
         region_end (int): 1-based end coordinate (inclusive).
@@ -176,12 +176,17 @@ def extract_region(fasta_file, chr, region_start, region_end):
     Returns:
         str or None: Extracted DNA sequence, or None if an error occurred.
     """
+    fasta = None
+    owns_handle = False
     try:
         if region_start < 1:
             region_start = 1
-        fasta = pysam.FastaFile(fasta_file)
+        if hasattr(fasta_file, "fetch"):
+            fasta = fasta_file
+        else:
+            fasta = pysam.FastaFile(fasta_file)
+            owns_handle = True
         sequence = fasta.fetch(chr, region_start, region_end)
-        fasta.close()
         return sequence
     except Exception as e:
         print(
@@ -189,6 +194,9 @@ def extract_region(fasta_file, chr, region_start, region_end):
             f"Details: {e}\n"
         )
         return None
+    finally:
+        if owns_handle and fasta is not None:
+            fasta.close()
 
 
 def extract_regions_by_name(

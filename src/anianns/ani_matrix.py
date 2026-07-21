@@ -2,7 +2,7 @@ from numba import njit, prange
 import numpy as np
 
 
-@njit
+@njit(cache=True)
 def intersection_len(a, b):
     """Two-pointer intersection count of sorted int arrays."""
     count = 0
@@ -21,7 +21,7 @@ def intersection_len(a, b):
     return count
 
 
-@njit(parallel=True)
+@njit(cache=True, parallel=True)
 def intersection_matrix(overlapping, non_overlapping, k):
     n = len(overlapping)
     mat = np.empty((n, n), dtype=np.float64)
@@ -49,7 +49,31 @@ def intersection_matrix(overlapping, non_overlapping, k):
     return mat
 
 
-@njit(parallel=True)
+@njit(cache=True, parallel=True)
+def intersection_matrix_thresholded(overlapping, non_overlapping, k, identity):
+    """Return a compact 0/1 matrix containing only scores above ``identity``."""
+    n = len(overlapping)
+    mat = np.zeros((n, n), dtype=np.bool_)
+    minimum_similarity = (identity / 100.0) ** k
+    for i in prange(n):
+        a = non_overlapping[i]
+        a_prime = overlapping[i]
+        len_a = len(a)
+        for j in range(i, n):
+            b = non_overlapping[j]
+            b_prime = overlapping[j]
+            len_b = len(b)
+            if len_a == 0 or len_b == 0:
+                continue
+            inter1 = intersection_len(a, b_prime) / len_a
+            inter2 = intersection_len(a_prime, b) / len_b
+            if max(inter1, inter2) >= minimum_similarity:
+                mat[i, j] = True
+                mat[j, i] = True
+    return mat
+
+
+@njit(cache=True, parallel=True)
 def intersection_matrix_inverted(
     A, B, overlapping_A, non_overlapping_A, overlapping_B, non_overlapping_B, k
 ):

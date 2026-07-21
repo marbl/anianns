@@ -2,6 +2,7 @@ import mmh3
 import pysam
 from typing import Iterable, List, Sequence
 import numpy as np
+from numba import njit
 
 tab_b = bytes.maketrans(b"ACTG", b"TGAC")
 
@@ -30,33 +31,74 @@ def convert_set_list_to_sorted_arrays(set_list):
     return [np.array(sorted(s), dtype=np.int32) for s in set_list]
 
 
-def build_kmer_sets(kmer_list, max_len, window, interval, prepend=None):
+@njit(cache=True)
+def _selected_unique(values, selected, start, end):
+    """Return sorted unique selected values from one positional slice."""
+    start = max(0, start)
+    end = min(end, len(values))
+    count = 0
+    for index in range(start, end):
+        if selected[index]:
+            count += 1
+
+    result = np.empty(count, dtype=np.int32)
+    output_index = 0
+    for index in range(start, end):
+        if selected[index]:
+            result[output_index] = values[index]
+            output_index += 1
+
+    if count <= 1:
+        return result
+
+    result.sort()
+    unique_count = 1
+    for index in range(1, count):
+        if result[index] != result[unique_count - 1]:
+            result[unique_count] = result[index]
+            unique_count += 1
+    return result[:unique_count].copy()
+
+
+@njit(cache=True)
+def _build_kmer_sets(values, selected, max_len, window, interval):
     non_sets = []
     overlap_sets = []
-
-    for i in range(max_len - 1):
-        start = i * window
+    for index in range(max_len - 1):
+        start = index * window
         end = start + window
-        ostart = max(0, start - interval)
-        oend = end + interval
-
-        # non-overlap slice (prepend only on the very first window if requested)
-        if prepend is not None and ostart == 0:
-            seq_non = prepend + kmer_list[start:end]
-        else:
-            seq_non = kmer_list[start:end]
-
-        # build your sets in one pass each, remove 0 k-mers
-        non_sets.append({x for x in seq_non if x % 4 == 0 and x != 0})
+        overlap_start = max(0, start - interval)
+        overlap_end = end + interval
+        non_sets.append(_selected_unique(values, selected, start, end))
         overlap_sets.append(
-            {x for x in kmer_list[ostart:oend] if x % 4 == 0 and x != 0}
+            _selected_unique(values, selected, overlap_start, overlap_end)
         )
+    return overlap_sets, non_sets
 
-    # return exactly as before (overlap first, then non-overlap)
-    return (
-        convert_set_list_to_sorted_arrays(overlap_sets),
-        convert_set_list_to_sorted_arrays(non_sets),
+
+def build_kmer_sets(
+    kmer_list, max_len, window, interval, prepend=None, sketch=4
+):
+    """Build sorted window sketches after computing the modulo mask once."""
+    if sketch not in (2, 4):
+        raise ValueError("sketch must be either 2 or 4")
+
+    values = np.asarray(kmer_list, dtype=np.int32)
+    selected = (values != 0) & (values % sketch == 0)
+    overlap_sets, non_sets = _build_kmer_sets(
+        values, selected, max_len, window, interval
     )
+
+    if prepend is not None and non_sets:
+        prepend_values = np.asarray(prepend, dtype=np.int32)
+        prepend_values = prepend_values[
+            (prepend_values != 0) & (prepend_values % sketch == 0)
+        ]
+        non_sets[0] = np.unique(
+            np.concatenate((prepend_values, non_sets[0]))
+        ).astype(np.int32, copy=False)
+
+    return overlap_sets, non_sets
 
 
 def read_sequence_kmers_from_file(

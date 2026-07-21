@@ -4,6 +4,7 @@ from anianns.ani_matrix import (
     intersection_len,
     intersection_matrix,
     intersection_matrix_inverted,
+    intersection_matrix_thresholded,
 )
 
 
@@ -31,6 +32,26 @@ def test_intersection_matrix_is_symmetric_and_handles_empty_windows():
     assert matrix[2, 2] == 0.0
     assert matrix[0, 2] == 0.0
     assert matrix[0, 1] > 0.0
+
+
+def test_thresholded_matrix_is_compact_and_matches_score_threshold():
+    overlapping = [
+        np.array([1, 2, 3, 4], dtype=np.int32),
+        np.array([1, 8, 9, 10], dtype=np.int32),
+    ]
+    non_overlapping = [
+        np.array([1, 2, 3, 4], dtype=np.int32),
+        np.array([1, 8, 9, 10], dtype=np.int32),
+    ]
+
+    scores = intersection_matrix.py_func(overlapping, non_overlapping, 2)
+    thresholded = intersection_matrix_thresholded.py_func(
+        overlapping, non_overlapping, 2, 75
+    )
+
+    assert thresholded.dtype == np.bool_
+    assert np.array_equal(thresholded, scores >= 75)
+    assert np.array_equal(thresholded, thresholded.T)
 
 
 def test_intersection_matrix_inverted_merges_two_blocks():

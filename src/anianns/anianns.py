@@ -8,9 +8,14 @@ import json
 import os
 import pysam
 import math
+import time
 import numpy as np
 
-from anianns.ani_matrix import intersection_matrix, intersection_matrix_inverted
+from anianns.ani_matrix import (
+    intersection_matrix,
+    intersection_matrix_inverted,
+    intersection_matrix_thresholded,
+)
 
 from anianns.build_kmer_db import (
     save_kmer_sets_shared_k,
@@ -33,9 +38,10 @@ from anianns.general_utils import (
 
 from anianns.kmer_utils import (
     build_kmer_sets,
-    generate_kmers_from_fasta,
     print_progress_bar,
 )
+
+from anianns.kmer_pipeline import SequenceBandPlan, iter_hashed_fasta_bands
 
 from anianns.parse_matrix import (
     append_coordinates,
@@ -76,6 +82,27 @@ def validate_ntrprism_range(start, end, seq_len):
     if start < 0 or end > seq_len:
         return f"[ERROR] --range ({start}, {end}) is out of bounds for sequence of length {seq_len}."
     return None
+
+
+def format_matrix_runtime(index, total, runtime, previous_runtime=None):
+    """Format a verbose per-matrix runtime and prior-matrix comparison."""
+    prefix = f"Matrix {index}/{total} completed in {runtime:.3f} s"
+    if previous_runtime is None:
+        return f"{prefix} (comparison baseline)."
+
+    difference = runtime - previous_runtime
+    if abs(difference) < 0.0005:
+        return f"{prefix} — same runtime as matrix {index - 1}."
+
+    direction = "slower" if difference > 0 else "faster"
+    percentage = (
+        abs(difference) / previous_runtime * 100 if previous_runtime > 0 else 0.0
+    )
+    sign = "+" if difference > 0 else "-"
+    return (
+        f"{prefix} — {abs(difference):.3f} s {direction} "
+        f"({sign}{percentage:.1f}%) than matrix {index - 1}."
+    )
 
 
 def get_parser():
@@ -168,6 +195,16 @@ def get_parser():
         "-k", "--kmer", type=int, default=21, help="k-mer length. Default: 21"
     )
     annotate_parser.add_argument(
+        "--sketch",
+        type=int,
+        choices=(2, 4),
+        default=4,
+        help=(
+            "Keep hashes divisible by this modulo when building window sketches. "
+            "Use 2 for a denser, slower sketch or 4 for the default."
+        ),
+    )
+    annotate_parser.add_argument(
         "-i", "--identity", type=int, default=86, help="Identity threshold. Default: 86"
     )
     annotate_parser.add_argument(
@@ -182,6 +219,14 @@ def get_parser():
         type=float,
         default=2.0,
         help="Max height in Mbp of band. Default: 2.0",
+    )
+    annotate_parser.add_argument(
+        "--cache-dir",
+        default=None,
+        help=(
+            "Directory for reusable canonical k-mer hash caches. "
+            "Default: <output directory>/.anianns_cache."
+        ),
     )
     annotate_parser.add_argument(
         "--identifier",
@@ -380,19 +425,28 @@ def main():
 
     # -------- ANNOTATE LOGIC --------#
     elif args.command == "annotate":
+        missing_fastas = [fasta for fasta in args.fasta if not os.path.isfile(fasta)]
+        if missing_fastas:
+            for fasta in missing_fastas:
+                print(f"[ERROR] FASTA file does not exist: {fasta}", file=sys.stderr)
+            sys.exit(1)
+
         # Prep args
         band_height = int(args.band * 1_000_000)
         interval = (args.window + 1) // 2
         directory = args.directory or os.getcwd()
+        hash_cache_dir = args.cache_dir or os.path.join(directory, ".anianns_cache")
 
         if not args.quiet:
             label_width = 20
 
             print(f"{'Output directory:':<{label_width}} {directory}")
             print(f"{'K-mer length:':<{label_width}} {args.kmer}")
+            print(f"{'Sketch modulo:':<{label_width}} {args.sketch}")
             print(f"{'Band height:':<{label_width}} {band_height} bp")
             print(f"{'Window size:':<{label_width}} {args.window} bp")
             print(f"{'ANI threshold:':<{label_width}} {args.identity} %")
+            print(f"{'Hash cache:':<{label_width}} {hash_cache_dir}")
             print(
                 f"{'K-mer dir:':<{label_width}} {args.classify if args.classify else 'None provided'}"
             )
@@ -431,13 +485,10 @@ def main():
             win = args.window
             verbosity = args.verbose
             build_sets = build_kmer_sets
-            imat = intersection_matrix
+            imat = intersection_matrix if args.plot else intersection_matrix_thresholded
             imat_inv = intersection_matrix_inverted
             get_span = get_diagonal_span
             merge_intv = merge_shared_boundaries
-
-            window_size = band_height + interval
-            max_len = (band_height + win) // win
 
             # 4) Main loops
             for fasta, seq_ids in pairs:
@@ -445,8 +496,7 @@ def main():
                 for seq_id in seq_ids:
                     # Define data structure for satellite coordinates. Variable names for sequence name, length, and if samtools was used for coordinates
                     satellite_coordinate_list = []
-                    seq_str = fh.fetch(seq_id)
-                    seq_len = len(seq_str)
+                    seq_len = fh.get_reference_length(seq_id)
                     seq_bounds = define_bounds(seq_id)
 
                     if seq_bounds and not args.quiet:
@@ -454,20 +504,40 @@ def main():
 
                     print(f"Creating an ANI matrix for {seq_id}:\n")
 
-                    # If seq_len is close to the band height, then keep everything in the same band.
-                    if seq_len < band_height + (band_height // 2):
-                        band_height = seq_len
-                        n_windows = 1
-                        if seq_len > band_height:
-                            print(f"Adjusting band to {band_height} bp.\n")
-                    else:
-                        n_windows = math.ceil(seq_len / band_height)
-                        remainder = seq_len % n_windows
-                        if remainder > 0 and remainder < band_height // 10:
-                            n_windows -= 1
+                    if seq_len < k_param:
+                        if not args.quiet:
+                            print(
+                                f"Sequence {seq_id} is shorter than k={k_param}; skipping.\n"
+                            )
+                        continue
 
-                    # k‑mer iterator. This is the generator function.
-                    kmer_it = generate_kmers_from_fasta(seq_str, k_param, True)
+                    # If seq_len is close to the band height, then keep everything in the same band.
+                    sequence_band_height = band_height
+                    if seq_len < band_height + (band_height // 2):
+                        sequence_band_height = seq_len
+                        if not args.quiet:
+                            print(f"Adjusting band to {sequence_band_height} bp.\n")
+
+                    band_plan = SequenceBandPlan(
+                        sequence_length=seq_len,
+                        kmer=k_param,
+                        band_height=sequence_band_height,
+                        windows=(win,),
+                    )
+                    n_windows = band_plan.band_count
+                    max_len = band_plan.window_plans[win].max_len
+                    band_iterator = iter(
+                        iter_hashed_fasta_bands(
+                            fasta,
+                            seq_id,
+                            band_plan,
+                            cache_dir=hash_cache_dir,
+                        )
+                    )
+                    try:
+                        first_band = next(band_iterator)
+                    except StopIteration:
+                        continue
 
                     if not args.quiet:
                         print_progress_bar(
@@ -479,18 +549,24 @@ def main():
                         )
 
                     # Create initial window
-                    kmers_list = list(islice(kmer_it, window_size))
-                    prev_ov, prev_nov = build_sets(kmers_list, max_len, win, interval)
-                    initial_matrix = imat(prev_ov, prev_nov, k_param)
-
-                    # Split matrix into M_diag and M_distal
-                    M_diag, M_distal = split_diagonal_attached(initial_matrix)
-
-                    # Plot here
+                    kmers_list = band_plan.hashes_for_window(first_band, win)
+                    prev_ov, prev_nov = build_sets(
+                        kmers_list, max_len, win, interval, sketch=args.sketch
+                    )
+                    matrix_started = time.perf_counter()
+                    initial_matrix = (
+                        imat(prev_ov, prev_nov, k_param)
+                        if args.plot
+                        else imat(prev_ov, prev_nov, k_param, args.identity)
+                    )
+                    previous_matrix_runtime = time.perf_counter() - matrix_started
                     if verbosity:
                         print(
-                            f"Partitioning into {n_windows} windows of {band_height} bp each.\n"
+                            format_matrix_runtime(
+                                1, n_windows, previous_matrix_runtime
+                            )
                         )
+
                     if n_windows > 1:
                         if not args.quiet:
                             print_progress_bar(
@@ -501,7 +577,12 @@ def main():
                                 length=40,
                             )
                         # Get spans for the initial window
-                        spans = get_span(initial_matrix, win, zero_tol=2)
+                        initial_detection_matrix = (
+                            initial_matrix >= args.identity
+                            if args.plot
+                            else initial_matrix
+                        )
+                        spans = get_span(initial_detection_matrix, win, zero_tol=2)
 
                         # TODO: Remove low count spans
                         """for element in spans:
@@ -509,39 +590,49 @@ def main():
 
                         # Replace 0 here with start prefix
                         for coordinates in merge_intv(
-                            intervals=spans, prefix=0, window=win, verbose=verbosity
+                            intervals=spans, prefix=0, window=win, verbose=False
                         ):
                             satellite_coordinate_list.append(coordinates)
-                        # Iterate through the remaining windows
-                        for w in range(2, n_windows + 1):
-                            if w == n_windows:
-                                chunk = list(kmer_it)
-                            else:
-                                chunk = list(islice(kmer_it, band_height))
-                            if not chunk:
-                                break
+                        # Iterate through independently fetched/hash-overlapped bands.
+                        # The producer queues one future band while this process
+                        # performs the current band's matrix work.
+                        for hashed_band in band_iterator:
+                            w = hashed_band.index + 1
+                            kmers_list = band_plan.hashes_for_window(hashed_band, win)
 
-                            # Keep last interval from old + new chunk
-                            kmers_list = kmers_list[-interval:] + chunk
-
-                            ov, nov = build_sets(kmers_list, max_len, win, interval)
-
-                            updated_matrix = imat(ov, nov, k_param)
-
-                            inv = imat_inv(
-                                initial_matrix,
-                                updated_matrix,
-                                prev_ov,
-                                prev_nov,
-                                ov,
-                                nov,
-                                k_param,
+                            ov, nov = build_sets(
+                                kmers_list, max_len, win, interval, sketch=args.sketch
                             )
-                            inv[inv < args.identity] = 0
-                            """sob = sobel_with_diagonal_probes(inv, thresh=0.7, min_thick=1)
-                            sys.exit(0)
-                            print(spans)"""
+
+                            matrix_started = time.perf_counter()
+                            updated_matrix = (
+                                imat(ov, nov, k_param)
+                                if args.plot
+                                else imat(ov, nov, k_param, args.identity)
+                            )
+                            matrix_runtime = time.perf_counter() - matrix_started
+                            if verbosity:
+                                print(
+                                    format_matrix_runtime(
+                                        w,
+                                        n_windows,
+                                        matrix_runtime,
+                                        previous_matrix_runtime,
+                                    )
+                                )
+                            previous_matrix_runtime = matrix_runtime
+
                             if args.plot:
+                                inv = imat_inv(
+                                    initial_matrix,
+                                    updated_matrix,
+                                    prev_ov,
+                                    prev_nov,
+                                    ov,
+                                    nov,
+                                    k_param,
+                                )
+                                inv[inv < args.identity] = 0
                                 plot_matrix(inv)
                                 os.makedirs(directory, exist_ok=True)
                                 matrix_filename = os.path.join(
@@ -550,12 +641,7 @@ def main():
                                 np.save(matrix_filename, inv)
                                 if not args.quiet:
                                     print(f"Saved matrix to {matrix_filename}")
-                            # sys.exit(0)
-                            # plot_matrix(inv)
-                            # sob = sobel_with_diagonal_probes(inv, thresh=0.7, min_thick=1)
-                            # plot_matrix(sob)
-                            M_diag, M_distal = split_diagonal_attached(inv)
-                            if args.plot:
+                                M_diag, M_distal = split_diagonal_attached(inv)
                                 diag_filename = os.path.join(
                                     directory, f"{seq_id}_diag_{w}_matrix.npy"
                                 )
@@ -565,26 +651,26 @@ def main():
                                 )
                                 np.save(distal_filename, M_distal)
 
-                            new_spans = get_span(updated_matrix, win, zero_tol=2)
-                            prefix_amount = band_height * (w - 1)
+                            updated_detection_matrix = (
+                                updated_matrix >= args.identity
+                                if args.plot
+                                else updated_matrix
+                            )
+                            new_spans = get_span(
+                                updated_detection_matrix, win, zero_tol=2
+                            )
+                            prefix_amount = hashed_band.start
 
                             # print(new_spans)
-                            if args.verbose:
-                                print("----------------------------------------------")
-
                             """if verbosity:
                                 print(f"Current prefix: {prefix_amount}\n")"""
                             for coordinates in merge_intv(
                                 intervals=new_spans,
                                 prefix=prefix_amount,
                                 window=win,
-                                verbose=verbosity,
+                                verbose=False,
                             ):
                                 satellite_coordinate_list.append(coordinates)
-
-                            if args.verbose:
-                                print(satellite_coordinate_list)
-                                print("-----\n")
                             """probes = sobel_with_diagonal_probes(
                                 M = inv,
                                 thresh = 0.7,
@@ -615,25 +701,24 @@ def main():
 
                     else:
                         # No progress bar in this case
-                        initial_matrix[initial_matrix < args.identity] = 0
-                        spans = get_span(initial_matrix, win, zero_tol=2)
+                        initial_detection_matrix = (
+                            initial_matrix >= args.identity
+                            if args.plot
+                            else initial_matrix
+                        )
+                        spans = get_span(initial_detection_matrix, win, zero_tol=2)
 
-                        # Get off diagonals here after screening for identity
-                        M_diag, M_offdiag = split_diagonal_attached(initial_matrix)
+                        if args.plot:
+                            initial_matrix[initial_matrix < args.identity] = 0
+                            plot_matrix(initial_matrix)
+                            M_diag, M_distal = split_diagonal_attached(initial_matrix)
 
                         for coordinates in merge_intv(
-                            intervals=spans, prefix=0, window=win, verbose=verbosity
+                            intervals=spans, prefix=0, window=win, verbose=False
                         ):
                             # Append only if the counts pass a threshold
                             # Counting threshold function here
                             satellite_coordinate_list.append(coordinates)
-                        if verbosity:
-                            print(satellite_coordinate_list)
-
-                    if verbosity:
-                        print(
-                            f"Initial spans before filtering:\n{satellite_coordinate_list}\n"
-                        )
 
                     filtered = []
                     for x, y, count in satellite_coordinate_list:
@@ -642,12 +727,8 @@ def main():
                         if (count_size <= size * 0.6) or (
                             count < 10 and count_size <= size * 0.75
                         ):
-                            if args.verbose:
-                                print(
-                                    f"Removing ({x}, {y}, {count}) - insufficient support"
-                                )
-                        else:
-                            filtered.append((x, y, count))
+                            continue
+                        filtered.append((x, y, count))
                     satellite_coordinate_list = filtered
                     # print(satellite_coordinate_list)
                     # sys.exit(0)
@@ -737,7 +818,7 @@ def main():
                     if seq_bounds:
                         # fa, seq_id, seq_len, band, offset, window, k, df: pl.DataFrame, classify, verbose, quiet) -> None:
                         tuple_of_lists = report_borders(
-                            fa=fasta,
+                            fa=fh,
                             seq_id=seq_id,
                             seq_len=seq_len,
                             band=args.band,
@@ -760,7 +841,7 @@ def main():
                         # print(tuple_of_lists)
                     else:
                         tuple_of_lists = report_borders(
-                            fa=fasta,
+                            fa=fh,
                             seq_id=seq_id,
                             seq_len=seq_len,
                             band=args.band,

@@ -112,8 +112,6 @@ def merge_shared_boundaries(intervals, prefix, window, verbose=True):
     )
 
     for (x, y), count in intervals:
-        if verbose:
-            print(x, y, count)
         # Base case, append to out if empty
         if len(out) == 0:
             out.append((x, y, count))
@@ -207,8 +205,6 @@ def process_entry(
         _update_out(out, idx, x, y, count, verbose=verbose)
     else:
         out.append((x, y, count))
-        if verbose:
-            print(f"Appended new: {(x, y, count)}")
 
 
 def sobel_spans(M, prefix):

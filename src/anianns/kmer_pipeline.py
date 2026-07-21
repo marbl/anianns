@@ -1,0 +1,374 @@
+"""Streaming FASTA band planning and canonical k-mer production."""
+
+from concurrent.futures import ProcessPoolExecutor
+from dataclasses import dataclass
+import hashlib
+import math
+import multiprocessing
+import os
+from pathlib import Path
+import tempfile
+from typing import Dict, Iterable, Iterator, Sequence
+
+import mmh3
+import numpy as np
+import pysam
+
+from anianns.kmer_utils import tab_b
+
+
+AMBIGUOUS_BASES = frozenset("RYMKSWHBVDN")
+HASH_CACHE_VERSION = 1
+
+
+@dataclass(frozen=True)
+class WindowPlan:
+    """Derived settings for one matrix window size."""
+
+    window: int
+    interval: int
+    max_len: int
+
+
+@dataclass(frozen=True)
+class BandRequest:
+    """A zero-based k-mer interval to fetch and hash."""
+
+    index: int
+    start: int
+    hash_count: int
+
+
+@dataclass(frozen=True)
+class HashedBand:
+    """Canonical hashes returned by a band producer."""
+
+    index: int
+    start: int
+    hashes: Sequence[int]
+
+
+class SequenceBandPlan:
+    """
+    Plan shared k-mer batches for one or more prospective window sizes.
+
+    Annotation currently supplies exactly one window size. Accepting several
+    here lays the data-flow foundation for a future multi-window mode: each
+    FASTA band is fetched and hashed once with enough right-hand overlap for
+    the largest requested window, and each window consumes only its own view.
+    """
+
+    def __init__(
+        self,
+        sequence_length: int,
+        kmer: int,
+        band_height: int,
+        windows: Sequence[int],
+    ):
+        if sequence_length < 0:
+            raise ValueError("sequence_length must be non-negative")
+        if kmer <= 0:
+            raise ValueError("kmer must be positive")
+        if band_height <= 0:
+            raise ValueError("band_height must be positive")
+        if not windows or any(window <= 0 for window in windows):
+            raise ValueError("at least one positive window size is required")
+
+        self.sequence_length = sequence_length
+        self.kmer = kmer
+        self.band_height = band_height
+        self.windows = tuple(dict.fromkeys(windows))
+        self.window_plans: Dict[int, WindowPlan] = {
+            window: WindowPlan(
+                window=window,
+                interval=(window + 1) // 2,
+                max_len=(band_height + window) // window,
+            )
+            for window in self.windows
+        }
+        self.total_kmers = max(0, sequence_length - kmer + 1)
+        self.max_interval = max(plan.interval for plan in self.window_plans.values())
+        self.band_count = (
+            math.ceil(self.total_kmers / band_height) if self.total_kmers else 0
+        )
+
+    def requests(self) -> Iterator[BandRequest]:
+        """Yield complete, non-growing band requests through sequence end."""
+        for index in range(self.band_count):
+            start = index * self.band_height
+            available = self.total_kmers - start
+            hash_count = min(self.band_height + self.max_interval, available)
+            yield BandRequest(index=index, start=start, hash_count=hash_count)
+
+    def hashes_for_window(self, band: HashedBand, window: int) -> Sequence[int]:
+        """Return the shared batch prefix required by one window size."""
+        try:
+            window_plan = self.window_plans[window]
+        except KeyError as error:
+            raise ValueError(f"window size {window} is not part of this plan") from error
+
+        available = self.total_kmers - band.start
+        required = min(self.band_height + window_plan.interval, available)
+        if len(band.hashes) < required:
+            raise ValueError(
+                f"band {band.index} contains {len(band.hashes)} hashes; "
+                f"window {window} requires {required}"
+            )
+        return band.hashes[:required]
+
+
+def canonical_kmer_hashes(sequence: str, kmer: int) -> np.ndarray:
+    """
+    Batch canonical mmh3 hashing while preserving existing hash semantics.
+
+    Uppercasing and ambiguous-base detection are performed once per sequence
+    batch rather than once for every overlapping substring. Hash values remain
+    identical to ``generate_kmers_from_fasta`` and therefore remain compatible
+    with existing AniAnn's k-mer databases.
+    """
+    if kmer <= 0:
+        raise ValueError("kmer must be positive")
+
+    sequence = sequence.upper()
+    total_kmers = len(sequence) - kmer + 1
+    if total_kmers <= 0:
+        return np.empty(0, dtype=np.int32)
+
+    hashes = np.zeros(total_kmers, dtype=np.int32)
+    ambiguous_count = sum(base in AMBIGUOUS_BASES for base in sequence[:kmer])
+    for index in range(total_kmers):
+        if ambiguous_count == 0:
+            kmer_string = sequence[index : index + kmer]
+            forward = mmh3.hash(kmer_string, seed=42)
+            reverse = mmh3.hash(kmer_string[::-1].translate(tab_b), seed=42)
+            hashes[index] = forward if forward < reverse else reverse
+
+        if index + 1 < total_kmers:
+            ambiguous_count -= sequence[index] in AMBIGUOUS_BASES
+            ambiguous_count += sequence[index + kmer] in AMBIGUOUS_BASES
+
+    return hashes
+
+
+_FASTA_HANDLE_CACHE = {}
+
+
+def _hash_fasta_band(
+    fasta_path: str,
+    seq_id: str,
+    sequence_length: int,
+    kmer: int,
+    request: BandRequest,
+) -> HashedBand:
+    """Fetch and hash one band. This top-level function is process-picklable."""
+    fasta = _FASTA_HANDLE_CACHE.get(fasta_path)
+    if fasta is None:
+        fasta = pysam.FastaFile(fasta_path)
+        _FASTA_HANDLE_CACHE[fasta_path] = fasta
+
+    base_end = min(sequence_length, request.start + request.hash_count + kmer - 1)
+    sequence = fasta.fetch(seq_id, request.start, base_end)
+    hashes = canonical_kmer_hashes(sequence, kmer)
+    if len(hashes) != request.hash_count:
+        raise ValueError(
+            f"Expected {request.hash_count} hashes for band {request.index}, "
+            f"received {len(hashes)}"
+        )
+    return HashedBand(index=request.index, start=request.start, hashes=hashes)
+
+
+def hash_cache_path(
+    cache_dir: str, fasta_path: str, seq_id: str, sequence_length: int, kmer: int
+) -> Path:
+    """Return the content-versioned cache path for one sequence and k-mer size."""
+    stat = os.stat(fasta_path)
+    identity = "\0".join(
+        (
+            str(HASH_CACHE_VERSION),
+            str(Path(fasta_path).resolve()),
+            str(stat.st_size),
+            str(stat.st_mtime_ns),
+            seq_id,
+            str(sequence_length),
+            str(kmer),
+        )
+    )
+    digest = hashlib.sha256(identity.encode("utf-8")).hexdigest()
+    return Path(cache_dir) / f"{digest}.npy"
+
+
+def _load_cached_hashes(cache_path: Path, total_kmers: int):
+    try:
+        hashes = np.load(cache_path, mmap_mode="r", allow_pickle=False)
+    except (OSError, ValueError):
+        return None
+    if hashes.dtype != np.int32 or hashes.shape != (total_kmers,):
+        return None
+    return hashes
+
+
+def _iter_uncached_hashed_fasta_bands(
+    fasta_path: str,
+    seq_id: str,
+    plan: SequenceBandPlan,
+    *,
+    use_process: bool,
+) -> Iterable[HashedBand]:
+    """Produce hashed bands without consulting or writing the disk cache."""
+    requests = iter(plan.requests())
+    try:
+        first_request = next(requests)
+    except StopIteration:
+        return
+
+    worker_args = (fasta_path, seq_id, plan.sequence_length, plan.kmer)
+    if not use_process or plan.band_count == 1:
+        yield _hash_fasta_band(*worker_args, first_request)
+        for request in requests:
+            yield _hash_fasta_band(*worker_args, request)
+        return
+
+    context = multiprocessing.get_context("spawn")
+    try:
+        executor = ProcessPoolExecutor(max_workers=1, mp_context=context)
+    except (OSError, NotImplementedError):
+        # Restricted runtimes may not expose the semaphore/sysconf facilities
+        # required by ProcessPoolExecutor. Preserve correctness by streaming
+        # synchronously rather than failing annotation startup.
+        yield _hash_fasta_band(*worker_args, first_request)
+        for request in requests:
+            yield _hash_fasta_band(*worker_args, request)
+        return
+    try:
+        current_future = executor.submit(_hash_fasta_band, *worker_args, first_request)
+        while current_future is not None:
+            band = current_future.result()
+            try:
+                next_request = next(requests)
+            except StopIteration:
+                next_future = None
+            else:
+                # Submit before yielding so hashing overlaps parent matrix work.
+                next_future = executor.submit(
+                    _hash_fasta_band, *worker_args, next_request
+                )
+            yield band
+            current_future = next_future
+    finally:
+        executor.shutdown(wait=True, cancel_futures=True)
+
+
+def iter_hashed_fasta_bands(
+    fasta_path: str,
+    seq_id: str,
+    plan: SequenceBandPlan,
+    *,
+    use_process: bool = True,
+    cache_dir: str = None,
+) -> Iterable[HashedBand]:
+    """
+    Yield bands in order with at most one future band queued ahead.
+
+    A single producer process avoids the GIL during canonical hashing while the
+    parent performs Numba matrix work. The one-band bound caps additional hash
+    memory and avoids oversubscribing Numba's parallel matrix workers.
+    """
+    if plan.total_kmers == 0:
+        return
+
+    if cache_dir is None:
+        yield from _iter_uncached_hashed_fasta_bands(
+            fasta_path, seq_id, plan, use_process=use_process
+        )
+        return
+
+    try:
+        cache_path = hash_cache_path(
+            cache_dir, fasta_path, seq_id, plan.sequence_length, plan.kmer
+        )
+        cache_path.parent.mkdir(parents=True, exist_ok=True)
+    except OSError:
+        yield from _iter_uncached_hashed_fasta_bands(
+            fasta_path, seq_id, plan, use_process=use_process
+        )
+        return
+
+    cached_hashes = _load_cached_hashes(cache_path, plan.total_kmers)
+    if cached_hashes is not None:
+        for request in plan.requests():
+            yield HashedBand(
+                index=request.index,
+                start=request.start,
+                hashes=cached_hashes[
+                    request.start : request.start + request.hash_count
+                ],
+            )
+        return
+
+    try:
+        temporary = tempfile.NamedTemporaryFile(
+            dir=cache_path.parent,
+            prefix=f".{cache_path.stem}.",
+            suffix=".npy",
+            delete=False,
+        )
+    except OSError:
+        yield from _iter_uncached_hashed_fasta_bands(
+            fasta_path, seq_id, plan, use_process=use_process
+        )
+        return
+    temporary_path = Path(temporary.name)
+    temporary.close()
+    try:
+        cache_hashes = np.lib.format.open_memmap(
+            temporary_path,
+            mode="w+",
+            dtype=np.int32,
+            shape=(plan.total_kmers,),
+        )
+    except (OSError, ValueError):
+        try:
+            temporary_path.unlink()
+        except OSError:
+            pass
+        yield from _iter_uncached_hashed_fasta_bands(
+            fasta_path, seq_id, plan, use_process=use_process
+        )
+        return
+
+    cache_writable = True
+    try:
+        for band in _iter_uncached_hashed_fasta_bands(
+            fasta_path, seq_id, plan, use_process=use_process
+        ):
+            core_count = min(plan.band_height, plan.total_kmers - band.start)
+            try:
+                if cache_writable:
+                    cache_hashes[band.start : band.start + core_count] = band.hashes[
+                        :core_count
+                    ]
+            except (OSError, ValueError):
+                cache_writable = False
+            yield band
+
+        if cache_writable:
+            try:
+                cache_hashes.flush()
+                del cache_hashes
+                cache_hashes = None
+                os.replace(temporary_path, cache_path)
+            except (OSError, ValueError):
+                # Caching is an optimization and must never fail annotation.
+                pass
+    finally:
+        if cache_hashes is not None:
+            try:
+                cache_hashes.flush()
+            except (OSError, ValueError):
+                pass
+            del cache_hashes
+        if temporary_path.exists():
+            try:
+                temporary_path.unlink()
+            except OSError:
+                pass
