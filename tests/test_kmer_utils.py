@@ -3,6 +3,8 @@ import numpy as np
 
 from anianns.kmer_utils import (
     build_kmer_sets,
+    build_kmer_sets_multi,
+    calculate_hash_distances,
     convert_set_list_to_sorted_arrays,
     generate_kmers_from_fasta,
     generate_kmers_from_fasta_forward_only,
@@ -21,6 +23,11 @@ def test_remove_ambiguous_bases_filters_known_homopolymers():
 
     assert keep in cleaned
     assert drop not in cleaned
+
+
+def test_compiled_hash_distances_match_consecutive_occurrences():
+    hashes = np.array([5, 7, 5, 5, 7, 9], dtype=np.int32)
+    assert calculate_hash_distances(hashes).tolist() == [2, 1, 3]
 
 
 def test_convert_set_list_to_sorted_arrays_preserves_sorted_values():
@@ -53,6 +60,27 @@ def test_build_kmer_sets_supports_denser_modulo_two_sketches():
 
     assert [arr.tolist() for arr in overlap] == [[2, 4], [2, 4, 6, 8]]
     assert [arr.tolist() for arr in non_overlap] == [[2], [4, 6]]
+
+
+def test_multi_window_sets_match_independent_prefix_builds():
+    hashes = np.arange(0, 80, 4, dtype=np.int32)
+    configs = {
+        4: (14, 4, 2),
+        8: (20, 3, 4),
+    }
+
+    combined = build_kmer_sets_multi(hashes, configs, sketch=4)
+
+    for window, (hash_count, max_len, interval) in configs.items():
+        independent = build_kmer_sets(
+            hashes[:hash_count], max_len, window, interval, sketch=4
+        )
+        for combined_sets, independent_sets in zip(combined[window], independent):
+            assert len(combined_sets) == len(independent_sets)
+            assert all(
+                np.array_equal(left, right)
+                for left, right in zip(combined_sets, independent_sets)
+            )
 
 
 def test_generate_kmers_handles_reverse_complements_and_ambiguous_bases():

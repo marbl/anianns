@@ -184,7 +184,7 @@ def test_get_fasta_indexed_chroms_and_headers(monkeypatch, capsys):
     assert "Failed to open or index FASTA file" in capsys.readouterr().out
 
 
-def test_plot_matrix_validates_inputs(monkeypatch):
+def test_plot_matrix_validates_inputs(monkeypatch, tmp_path):
     monkeypatch.setattr("anianns.general_utils.plt.show", lambda: None)
 
     with pytest.raises(TypeError):
@@ -194,6 +194,20 @@ def test_plot_matrix_validates_inputs(monkeypatch):
         plot_matrix(pl.Series("x", [1, 2]).to_numpy())
 
     plot_matrix(pl.DataFrame([[1, 2], [3, 4]]).to_numpy(), show_colorbar=False)
+
+    save_path = tmp_path / "heatmap.png"
+    monkeypatch.setattr(
+        "anianns.general_utils.plt.show",
+        lambda: (_ for _ in ()).throw(AssertionError("interactive display used")),
+    )
+    plot_matrix(
+        pl.DataFrame([[86, 90], [95, 100]]).to_numpy(),
+        show_colorbar=False,
+        dpi=36,
+        figsize=(2, 2),
+        save_path=save_path,
+    )
+    assert save_path.exists()
 
 
 def test_read_bed_files_skips_headers_and_casts_coordinates(tmp_path):

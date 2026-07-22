@@ -2,9 +2,28 @@ import mmh3
 import pysam
 from typing import Iterable, List, Sequence
 import numpy as np
-from numba import njit
+from numba import njit, types
+from numba.typed import Dict as NumbaDict
 
 tab_b = bytes.maketrans(b"ACTG", b"TGAC")
+
+
+@njit(cache=True)
+def calculate_hash_distances(hashes):
+    """Return distances between consecutive occurrences of each hash."""
+    last_indices = NumbaDict.empty(
+        key_type=types.int32,
+        value_type=types.int64,
+    )
+    distances = np.empty(len(hashes), dtype=np.int64)
+    distance_count = 0
+    for index in range(len(hashes)):
+        value = hashes[index]
+        if value in last_indices:
+            distances[distance_count] = index - last_indices[value]
+            distance_count += 1
+        last_indices[value] = index
+    return distances[:distance_count].copy()
 
 
 def _progress_settings(n: int, k: int):
@@ -99,6 +118,36 @@ def build_kmer_sets(
         ).astype(np.int32, copy=False)
 
     return overlap_sets, non_sets
+
+
+def build_kmer_sets_multi(kmer_list, window_configs, sketch=4):
+    """Build several window resolutions while calculating the sketch mask once.
+
+    ``window_configs`` maps each window size to
+    ``(hash_count, max_len, interval)``. All views must be prefixes of the
+    supplied shared band hashes.
+    """
+    if sketch not in (2, 4):
+        raise ValueError("sketch must be either 2 or 4")
+
+    values = np.asarray(kmer_list, dtype=np.int32)
+    selected = (values != 0) & (values % sketch == 0)
+    results = {}
+    for window, (hash_count, max_len, interval) in window_configs.items():
+        hash_count = int(hash_count)
+        if hash_count < 0 or hash_count > len(values):
+            raise ValueError(
+                f"window {window} requested {hash_count} hashes from a "
+                f"{len(values)}-hash band"
+            )
+        results[int(window)] = _build_kmer_sets(
+            values[:hash_count],
+            selected[:hash_count],
+            int(max_len),
+            int(window),
+            int(interval),
+        )
+    return results
 
 
 def read_sequence_kmers_from_file(

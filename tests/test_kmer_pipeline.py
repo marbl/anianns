@@ -1,14 +1,31 @@
 import numpy as np
 import pysam
+from pathlib import Path
 
 from anianns import kmer_pipeline
 from anianns.kmer_pipeline import (
     HashedBand,
     SequenceBandPlan,
     canonical_kmer_hashes,
+    forward_kmer_hashes,
     iter_hashed_fasta_bands,
+    load_cached_sequence_hashes,
 )
 from anianns.kmer_utils import generate_kmers_from_fasta
+from anianns.kmer_utils import generate_kmers_from_fasta_forward_only
+
+
+def test_default_hash_cache_is_shared_and_configurable(monkeypatch, tmp_path):
+    configured = tmp_path / "shared-cache"
+    monkeypatch.setenv("ANIANNS_CACHE_DIR", str(configured))
+
+    assert kmer_pipeline.default_hash_cache_dir() == configured
+
+    monkeypatch.delenv("ANIANNS_CACHE_DIR")
+    monkeypatch.setattr(Path, "home", classmethod(lambda cls: tmp_path))
+    default = kmer_pipeline.default_hash_cache_dir()
+    assert default.name == "hashes"
+    assert default.parent.name == "anianns"
 
 
 def test_canonical_kmer_hashes_match_existing_generator_exactly():
@@ -24,6 +41,15 @@ def test_canonical_kmer_hashes_match_existing_generator_exactly():
             list(generate_kmers_from_fasta(sequence, 4, True)), dtype=np.int32
         )
         assert np.array_equal(canonical_kmer_hashes(sequence, 4), expected)
+
+
+def test_batch_forward_hashes_match_existing_generator_exactly():
+    for sequence in ("ACTGactgACTG", "AAARYMKSWNtttACTG", "ACT"):
+        expected = np.array(
+            list(generate_kmers_from_fasta_forward_only(sequence, 6, True)),
+            dtype=np.int32,
+        )
+        assert np.array_equal(forward_kmer_hashes(sequence, 6), expected)
 
 
 def test_sequence_band_plan_covers_tail_and_shares_multi_window_hashes():
@@ -128,6 +154,11 @@ def test_disk_hash_cache_is_reused_across_band_and_window_plans(
     )
     first_run_calls = calls
     assert first_run_calls == first_plan.band_count
+    cached_hashes = load_cached_sequence_hashes(
+        str(cache_dir), str(fasta_path), "chr1", len(sequence), 4
+    )
+    assert isinstance(cached_hashes, np.memmap)
+    assert np.array_equal(cached_hashes, expected)
 
     second_plan = SequenceBandPlan(len(sequence), 4, 7, (5, 9))
     second_bands = list(

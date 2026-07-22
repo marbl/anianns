@@ -1,4 +1,5 @@
 import argparse
+import csv
 from tokenize import group
 from anianns.const import ASCII_ART, DESCRIPTION, VERSION
 from itertools import islice
@@ -11,11 +12,7 @@ import math
 import time
 import numpy as np
 
-from anianns.ani_matrix import (
-    intersection_matrix,
-    intersection_matrix_inverted,
-    intersection_matrix_thresholded,
-)
+from anianns.ani_matrix import intersection_matrix_thresholded
 
 from anianns.build_kmer_db import (
     save_kmer_sets_shared_k,
@@ -38,23 +35,54 @@ from anianns.general_utils import (
 
 from anianns.kmer_utils import (
     build_kmer_sets,
+    build_kmer_sets_multi,
     print_progress_bar,
 )
 
-from anianns.kmer_pipeline import SequenceBandPlan, iter_hashed_fasta_bands
-
-from anianns.parse_matrix import (
-    append_coordinates,
-    get_diagonal_span,
-    merge_shared_boundaries,
-    sobel_with_diagonal_probes,
-    sobel_spans,
-    split_diagonal_attached,
+from anianns.kmer_pipeline import (
+    SequenceBandPlan,
+    default_hash_cache_dir,
+    iter_hashed_fasta_bands,
+    load_cached_sequence_hashes,
 )
 
-from anianns.refine_boundaries import report_borders
+from anianns.ntrprism import (
+    analyze_kmer_spacings,
+    format_ascii_histogram,
+    format_spacing_table,
+    write_spacing_histogram,
+    write_spacing_report,
+)
+
+from anianns.multi_window import (
+    WindowCandidate,
+    candidate_passes_support,
+    derive_window_sizes,
+    select_multi_window_candidates,
+    write_window_selection,
+)
+
+from anianns.parse_matrix import (
+    CandidateNeighborhoodAccumulator,
+    DistalSatelliteLink,
+    append_coordinates,
+    deduplicate_distal_links,
+    detect_adjacent_band_bridge,
+    detect_candidate_to_all_links_from_full_matrix,
+    detect_distal_links,
+    filter_candidate_distal_links,
+    get_diagonal_span,
+    get_diagonal_span_from_sets,
+    merge_shared_boundaries,
+    snap_distal_links_to_candidates,
+    sobel_with_diagonal_probes,
+    sobel_spans,
+)
+
+from anianns.refine_boundaries import detect_precise_boundaries, report_borders
 
 from anianns.union_find import (
+    SatelliteDSU,
     sobel,
     sobel_with_diagonal_probes2,
     find_offdiag_rectangles,
@@ -84,6 +112,122 @@ def validate_ntrprism_range(start, end, seq_len):
     return None
 
 
+def run_ntrprism_command(args):
+    """Validate and analyze one region, printing results and optionally saving."""
+    fasta_path = args.fasta
+    if not os.path.isfile(fasta_path):
+        print(f"[ERROR] FASTA file does not exist: {fasta_path}", file=sys.stderr)
+        raise SystemExit(1)
+
+    fasta = None
+    try:
+        try:
+            fasta = pysam.FastaFile(fasta_path)
+        except (OSError, ValueError) as error:
+            print(
+                f"[ERROR] Unable to open FASTA file {fasta_path}: {error}",
+                file=sys.stderr,
+            )
+            raise SystemExit(1)
+
+        if args.seq_id not in fasta.references:
+            print(
+                f"[ERROR] Sequence ID '{args.seq_id}' was not found in {fasta_path}.",
+                file=sys.stderr,
+            )
+            raise SystemExit(1)
+
+        sequence_length = fasta.get_reference_length(args.seq_id)
+        start, end = args.range
+        range_error = validate_ntrprism_range(start, end, sequence_length)
+        if range_error:
+            print(range_error, file=sys.stderr)
+            raise SystemExit(1)
+
+        try:
+            sequence = fasta.fetch(args.seq_id, start, end)
+        except (KeyError, OSError, ValueError) as error:
+            print(
+                f"[ERROR] Unable to fetch region {args.seq_id}:{start}-{end} "
+                f"from {fasta_path}: {error}",
+                file=sys.stderr,
+            )
+            raise SystemExit(1)
+    finally:
+        if fasta is not None:
+            fasta.close()
+
+    try:
+        peaks, total_distances = analyze_kmer_spacings(
+            sequence,
+            kmer=args.kmer,
+            merge_distance=args.merge_distance,
+        )
+    except ValueError as error:
+        print(f"[ERROR] Cannot analyze requested region: {error}.", file=sys.stderr)
+        raise SystemExit(1)
+
+    interval_length = end - start
+    if not args.quiet:
+        print(
+            f"NTRPrism: {args.seq_id}:{start}-{end} "
+            f"({interval_length:,} bp, k={args.kmer})\n"
+        )
+        print(format_spacing_table(peaks, interval_length, top_n=10))
+        print()
+        print(format_ascii_histogram(peaks, interval_length, top_n=10))
+
+    if not args.save:
+        return None
+
+    output_directory = args.directory or os.getcwd()
+    try:
+        os.makedirs(output_directory, exist_ok=True)
+    except OSError as error:
+        print(
+            f"[ERROR] Unable to create output directory {output_directory}: {error}",
+            file=sys.stderr,
+        )
+        raise SystemExit(1)
+
+    safe_sequence_id = "".join(
+        character if character.isalnum() or character in "._-" else "_"
+        for character in args.seq_id
+    )
+    output_stem = f"{safe_sequence_id}_{start}_{end}_ntrprism"
+    report_path = os.path.join(output_directory, f"{output_stem}.txt")
+    histogram_path = os.path.join(output_directory, f"{output_stem}.png")
+    try:
+        write_spacing_report(
+            report_path,
+            fasta_path=fasta_path,
+            sequence_id=args.seq_id,
+            start=start,
+            end=end,
+            kmer=args.kmer,
+            merge_distance=args.merge_distance,
+            peaks=peaks,
+            total_distances=total_distances,
+            top_n=10,
+        )
+        write_spacing_histogram(
+            histogram_path,
+            peaks=peaks,
+            sequence_id=args.seq_id,
+            start=start,
+            end=end,
+            kmer=args.kmer,
+        )
+    except OSError as error:
+        print(f"[ERROR] Unable to write NTRPrism output: {error}", file=sys.stderr)
+        raise SystemExit(1)
+
+    if not args.quiet:
+        print(f"Saved NTRPrism top-10 spacing report to {report_path}")
+        print(f"Saved NTRPrism spacing histogram to {histogram_path}")
+    return report_path, histogram_path
+
+
 def format_matrix_runtime(index, total, runtime, previous_runtime=None):
     """Format a verbose per-matrix runtime and prior-matrix comparison."""
     prefix = f"Matrix {index}/{total} completed in {runtime:.3f} s"
@@ -103,6 +247,552 @@ def format_matrix_runtime(index, total, runtime, previous_runtime=None):
         f"{prefix} — {abs(difference):.3f} s {direction} "
         f"({sign}{percentage:.1f}%) than matrix {index - 1}."
     )
+
+
+def iter_with_stage_timing(iterator, timings, stage):
+    """Accumulate only the time spent waiting for an iterator's next item."""
+    while True:
+        started = time.perf_counter()
+        try:
+            item = next(iterator)
+        except StopIteration:
+            timings[stage] += time.perf_counter() - started
+            return
+        timings[stage] += time.perf_counter() - started
+        yield item
+
+
+def scan_additional_window_candidates(
+    hashed_band,
+    band_plan,
+    windows,
+    *,
+    kmer,
+    identity,
+    sketch,
+    prebuilt_sketches=None,
+):
+    """Scan extra resolutions from shared band hashes without dense matrices."""
+    if not windows:
+        return [], 0.0, 0.0
+
+    if prebuilt_sketches is None:
+        sketches, sketch_runtime = build_band_window_sketches(
+            hashed_band, band_plan, windows, sketch=sketch
+        )
+    else:
+        sketches = prebuilt_sketches
+        sketch_runtime = 0.0
+
+    scan_runtime = 0.0
+    candidates = []
+    for window in windows:
+        overlapping, non_overlapping = sketches[window]
+        scan_started = time.perf_counter()
+        spans = get_diagonal_span_from_sets(
+            overlapping,
+            non_overlapping,
+            window,
+            kmer,
+            identity,
+            zero_tol=2,
+        )
+        local_candidates = merge_shared_boundaries(
+            intervals=spans,
+            prefix=0,
+            window=window,
+            verbose=False,
+        )
+        scan_runtime += time.perf_counter() - scan_started
+        candidates.extend(
+            WindowCandidate(
+                start=start + hashed_band.start,
+                end=end + hashed_band.start,
+                count=count,
+                window=window,
+            )
+            for start, end, count in local_candidates
+        )
+    return candidates, sketch_runtime, scan_runtime
+
+
+def combine_band_candidates(primary_candidates, additional_candidates, prefix):
+    """Combine primary and supported multi-window calls in band coordinates."""
+    combined = [tuple(candidate) for candidate in primary_candidates]
+    seen = {(int(start), int(end)) for start, end, *_rest in combined}
+    for candidate in additional_candidates:
+        if not candidate_passes_support(candidate):
+            continue
+        local = (
+            int(candidate.start) - int(prefix),
+            int(candidate.end) - int(prefix),
+            int(candidate.count),
+        )
+        key = local[:2]
+        if key not in seen:
+            combined.append(local)
+            seen.add(key)
+    return combined
+
+
+def build_band_window_sketches(hashed_band, band_plan, windows, *, sketch):
+    """Build all requested band resolutions with one modulo-mask pass."""
+    window_configs = {}
+    for window in windows:
+        window_plan = band_plan.window_plans[window]
+        hash_count = len(band_plan.hashes_for_window(hashed_band, window))
+        window_configs[window] = (
+            hash_count,
+            window_plan.max_len,
+            window_plan.interval,
+        )
+
+    started = time.perf_counter()
+    sketches = build_kmer_sets_multi(
+        hashed_band.hashes,
+        window_configs,
+        sketch=sketch,
+    )
+    return sketches, time.perf_counter() - started
+
+
+def save_matrix_heatmap(
+    matrix,
+    output_directory,
+    seq_id,
+    matrix_index,
+    genomic_start,
+    window,
+    identity,
+    distal_links=(),
+):
+    """Save one low-resolution band matrix heatmap and return its path."""
+    plot_directory = os.path.join(output_directory, "matrix_plots")
+    os.makedirs(plot_directory, exist_ok=True)
+    safe_seq_id = str(seq_id).replace(os.sep, "_")
+    if os.altsep:
+        safe_seq_id = safe_seq_id.replace(os.altsep, "_")
+    plot_path = os.path.join(
+        plot_directory,
+        f"{safe_seq_id}_matrix_{matrix_index:04d}.png",
+    )
+    genomic_end = genomic_start + (matrix.shape[0] * window)
+    display_matrix, display_scale = downsample_binary_matrix(matrix)
+    highlight_ranges = []
+    for link in distal_links:
+        # The similarity matrix is symmetric, so show both orientations.
+        highlight_ranges.extend(
+            (
+                (
+                    link.start2 - genomic_start,
+                    link.end2 - genomic_start,
+                    link.start1 - genomic_start,
+                    link.end1 - genomic_start,
+                ),
+                (
+                    link.start1 - genomic_start,
+                    link.end1 - genomic_start,
+                    link.start2 - genomic_start,
+                    link.end2 - genomic_start,
+                ),
+            )
+        )
+    plot_matrix(
+        display_matrix,
+        title=(
+            f"{seq_id} matrix {matrix_index}: "
+            f"{genomic_start:,}-{genomic_end:,} bp"
+        ),
+        show_colorbar=False,
+        dpi=100,
+        figsize=(5.5, 5.5),
+        save_path=plot_path,
+        offset=window * display_scale,
+        vmin=0,
+        vmax=1,
+        aspect="equal",
+        highlight_ranges=highlight_ranges,
+    )
+    return plot_path
+
+
+def save_adjacent_matrix_heatmap(
+    previous_matrix,
+    current_matrix,
+    cross_matrix,
+    output_directory,
+    seq_id,
+    previous_index,
+    current_index,
+    genomic_start,
+    window,
+    distal_links=(),
+    seam_candidates=(),
+):
+    """Save a sparse two-band view only when the adjacent bridge found evidence."""
+    pair_directory = os.path.join(output_directory, "matrix_pairs")
+    os.makedirs(pair_directory, exist_ok=True)
+    safe_seq_id = str(seq_id).replace(os.sep, "_")
+    if os.altsep:
+        safe_seq_id = safe_seq_id.replace(os.altsep, "_")
+    plot_path = os.path.join(
+        pair_directory,
+        f"{safe_seq_id}_matrices_{previous_index:04d}_{current_index:04d}.png",
+    )
+    combined = np.block(
+        [
+            [previous_matrix, cross_matrix],
+            [cross_matrix.T, current_matrix],
+        ]
+    )
+    display_matrix, display_scale = downsample_binary_matrix(combined)
+    genomic_end = genomic_start + (combined.shape[0] * window)
+    highlight_ranges = []
+    for link in distal_links:
+        highlight_ranges.extend(
+            (
+                (
+                    link.start2 - genomic_start,
+                    link.end2 - genomic_start,
+                    link.start1 - genomic_start,
+                    link.end1 - genomic_start,
+                ),
+                (
+                    link.start1 - genomic_start,
+                    link.end1 - genomic_start,
+                    link.start2 - genomic_start,
+                    link.end2 - genomic_start,
+                ),
+            )
+        )
+    for start, end, _count in seam_candidates:
+        highlight_ranges.append(
+            (
+                start - genomic_start,
+                end - genomic_start,
+                start - genomic_start,
+                end - genomic_start,
+            )
+        )
+    plot_matrix(
+        display_matrix,
+        title=(
+            f"{seq_id}\nmatrices {previous_index}-{current_index}: "
+            f"{genomic_start:,}-{genomic_end:,} bp"
+        ),
+        show_colorbar=False,
+        dpi=100,
+        figsize=(5.5, 5.5),
+        save_path=plot_path,
+        offset=window * display_scale,
+        vmin=0,
+        vmax=1,
+        aspect="equal",
+        highlight_ranges=highlight_ranges,
+    )
+    return plot_path
+
+
+def incorporate_seam_candidates(candidates, seam_candidates, window):
+    """Merge boundary-spanning evidence with candidate fragments in place."""
+    for seam_start, seam_end, seam_count in seam_candidates:
+        matching = []
+        for index, (start, end, _count) in enumerate(candidates):
+            gap = max(start - seam_end, seam_start - end, 0)
+            if gap <= 2 * window and start < seam_end and end > seam_start:
+                matching.append(index)
+        if matching:
+            matched = [candidates[index] for index in matching]
+            merged_start = min(seam_start, *(item[0] for item in matched))
+            merged_end = max(seam_end, *(item[1] for item in matched))
+            merged_count = max(
+                seam_count,
+                sum(item[2] for item in matched),
+            )
+            for index in reversed(matching):
+                del candidates[index]
+            candidates.append((merged_start, merged_end, merged_count))
+        else:
+            candidates.append((seam_start, seam_end, seam_count))
+    candidates.sort(key=lambda candidate: (candidate[0], candidate[1]))
+
+
+def detect_and_save_matrix_heatmap(
+    matrix,
+    output_directory,
+    seq_id,
+    matrix_index,
+    genomic_start,
+    window,
+    identity,
+    candidates,
+):
+    """Detect local distal blocks and overlay them on a saved heatmap."""
+    links = detect_matrix_distal_links(
+        matrix, genomic_start, window, candidates
+    )
+    plot_path = save_matrix_heatmap(
+        matrix,
+        output_directory,
+        seq_id,
+        matrix_index,
+        genomic_start,
+        window,
+        identity,
+        distal_links=links,
+    )
+    return plot_path, links
+
+
+def detect_matrix_distal_links(matrix, genomic_start, window, candidates):
+    """Detect and filter distal links in one band without rendering it."""
+    genomic_starts = genomic_start + (
+        np.arange(matrix.shape[0], dtype=np.int64) * window
+    )
+    candidate_ranges = tuple(
+        (genomic_start + int(start), genomic_start + int(end))
+        for start, end, _count in candidates
+    )
+    links = detect_distal_links(
+        matrix,
+        genomic_starts,
+        candidate_ranges,
+        window,
+    )
+    links = filter_candidate_distal_links(
+        links,
+        tuple((*interval, 0) for interval in candidate_ranges),
+        proximity=2 * window,
+    )
+    return links
+
+
+def downsample_binary_matrix(matrix, max_pixels=512):
+    """Max-pool a boolean matrix to the plot's actual low-resolution raster."""
+    binary = np.asarray(matrix, dtype=np.bool_)
+    if binary.ndim != 2:
+        raise ValueError("plot matrix must be two-dimensional")
+    if max_pixels <= 0:
+        raise ValueError("max_pixels must be positive")
+    largest_axis = max(binary.shape, default=0)
+    scale = max(1, math.ceil(largest_axis / max_pixels))
+    if scale == 1 or binary.size == 0:
+        return binary, scale
+
+    padded_rows = math.ceil(binary.shape[0] / scale) * scale
+    padded_columns = math.ceil(binary.shape[1] / scale) * scale
+    padded = np.zeros((padded_rows, padded_columns), dtype=np.bool_)
+    padded[: binary.shape[0], : binary.shape[1]] = binary
+    pooled = padded.reshape(
+        padded_rows // scale,
+        scale,
+        padded_columns // scale,
+        scale,
+    ).any(axis=(1, 3))
+    return pooled, scale
+
+
+def write_distal_links(links, seq_id, output_path, coordinate_offset=0):
+    """Write detected distal relationships as BEDPE plus support metrics."""
+    with open(output_path, "w", newline="") as handle:
+        writer = csv.writer(handle, delimiter="\t")
+        writer.writerow(
+            (
+                "#chrom1",
+                "start1",
+                "end1",
+                "chrom2",
+                "start2",
+                "end2",
+                "name",
+                "score",
+                "strand1",
+                "strand2",
+                "source",
+                "density",
+                "row_coverage",
+                "column_coverage",
+                "hit_count",
+            )
+        )
+        for index, link in enumerate(links, start=1):
+            writer.writerow(
+                (
+                    seq_id,
+                    link.start1 + coordinate_offset,
+                    link.end1 + coordinate_offset,
+                    seq_id,
+                    link.start2 + coordinate_offset,
+                    link.end2 + coordinate_offset,
+                    f"distal_link_{index:04d}",
+                    min(1000, round(link.density * 1000)),
+                    ".",
+                    ".",
+                    link.source,
+                    f"{link.density:.6f}",
+                    f"{link.row_coverage:.6f}",
+                    f"{link.column_coverage:.6f}",
+                    link.hit_count,
+                )
+            )
+
+
+def promote_unmatched_distal_candidates(
+    links,
+    starts,
+    ends,
+    names,
+    monomers,
+    periodicities,
+    hor_flags,
+    *,
+    fasta_file,
+    seq_id,
+    seq_len,
+    window,
+    k,
+    sequence_hashes=None,
+    verbose=False,
+):
+    """NTR-validate and add the missing endpoint of one-sided distal links."""
+
+    def overlap(first, second):
+        amount = max(0, min(first[1], second[1]) - max(first[0], second[0]))
+        if amount == 0:
+            return 0.0
+        return amount / min(first[1] - first[0], second[1] - second[0])
+
+    def match(interval):
+        best_index = None
+        best_overlap = 0.0
+        for index, candidate in enumerate(zip(starts, ends)):
+            candidate_overlap = overlap(interval, candidate)
+            if candidate_overlap > best_overlap:
+                best_index = index
+                best_overlap = candidate_overlap
+        return best_index if best_overlap >= 0.5 else None
+
+    promoted_cache = {}
+    validated_links = []
+    ordered_links = sorted(
+        links,
+        key=lambda link: (
+            link.source not in ("candidate", "candidate_to_all"),
+            -(link.density + min(link.row_coverage, link.column_coverage)),
+        ),
+    )
+    for link in ordered_links:
+        intervals = [(link.start1, link.end1), (link.start2, link.end2)]
+        matches = [match(interval) for interval in intervals]
+        for axis, candidate_index in enumerate(matches):
+            if candidate_index is not None:
+                intervals[axis] = (
+                    int(starts[candidate_index]),
+                    int(ends[candidate_index]),
+                )
+        matched_count = sum(index is not None for index in matches)
+        if matched_count == 0:
+            continue
+        if matched_count == 1:
+            unknown_axis = 0 if matches[0] is None else 1
+            unknown_interval = intervals[unknown_axis]
+            if unknown_interval not in promoted_cache:
+                previous = max(
+                    (
+                        (int(start), int(end))
+                        for start, end in zip(starts, ends)
+                        if int(end) <= unknown_interval[0]
+                    ),
+                    default=(0, 1),
+                    key=lambda candidate: candidate[1],
+                )
+                try:
+                    result = detect_precise_boundaries(
+                        fasta_file=fasta_file,
+                        seq_id=seq_id,
+                        seq_len=seq_len,
+                        window=window,
+                        k=k,
+                        coordinates=unknown_interval,
+                        verbose=verbose,
+                        classify=False,
+                        previous_coordinates=previous,
+                        sequence_hashes=sequence_hashes,
+                    )
+                except Exception as error:
+                    if verbose:
+                        print(
+                            f"Unable to validate distal-only candidate "
+                            f"{unknown_interval}: {error}"
+                        )
+                    result = None
+
+                if result is None or result[3] is None or result[3][0] in (None, 0):
+                    promoted_cache[unknown_interval] = None
+                else:
+                    promoted_start, promoted_end, promoted_name, prism = result
+                    refined_interval = (int(promoted_start), int(promoted_end))
+                    # Do not turn a fragment of the known endpoint into a new node.
+                    if match(refined_interval) is not None:
+                        promoted_cache[unknown_interval] = None
+                    else:
+                        starts.append(refined_interval[0])
+                        ends.append(refined_interval[1])
+                        names.append(promoted_name)
+                        monomers.append(prism[0])
+                        periodicities.append(prism[2])
+                        hor_flags.append(bool(prism[1]))
+                        promoted_cache[unknown_interval] = refined_interval
+                        if verbose:
+                            print(
+                                f"Promoted NTR-validated distal satellite at "
+                                f"{refined_interval[0]}-{refined_interval[1]}"
+                            )
+
+            promoted_interval = promoted_cache[unknown_interval]
+            if promoted_interval is None:
+                continue
+            intervals[unknown_axis] = promoted_interval
+
+        first, second = intervals
+        if first[0] > second[0]:
+            first, second = second, first
+        if match(first) is None or match(second) is None or match(first) == match(second):
+            continue
+        validated_links.append(
+            DistalSatelliteLink(
+                start1=first[0],
+                end1=first[1],
+                start2=second[0],
+                end2=second[1],
+                source=link.source,
+                density=link.density,
+                row_coverage=link.row_coverage,
+                column_coverage=link.column_coverage,
+                hit_count=link.hit_count,
+            )
+        )
+
+    satellites = sorted(
+        zip(starts, ends, names, monomers, periodicities, hor_flags),
+        key=lambda satellite: (satellite[0], satellite[1]),
+    )
+    if satellites:
+        (
+            sorted_starts,
+            sorted_ends,
+            sorted_names,
+            sorted_monomers,
+            sorted_periodicities,
+            sorted_hor_flags,
+        ) = map(list, zip(*satellites))
+        starts[:] = sorted_starts
+        ends[:] = sorted_ends
+        names[:] = sorted_names
+        monomers[:] = sorted_monomers
+        periodicities[:] = sorted_periodicities
+        hor_flags[:] = sorted_hor_flags
+    return deduplicate_distal_links(validated_links)
 
 
 def get_parser():
@@ -212,7 +902,11 @@ def get_parser():
         "--window",
         type=int,
         default=2000,
-        help="Dotplot window size, or the number of bp contained within each pixel in a plot. This is proportional to the sensitivity of satellite detection (ie. lower is more accurate, at the expense of runtime). Default: 2000.",
+        help=(
+            "Central dotplot window size. AniAnn's also scans half and double "
+            "this value using shared hashes. Default: 2000 (scans 1000, "
+            "2000, and 4000)."
+        ),
     )
     annotate_parser.add_argument(
         "--band",
@@ -225,7 +919,7 @@ def get_parser():
         default=None,
         help=(
             "Directory for reusable canonical k-mer hash caches. "
-            "Default: <output directory>/.anianns_cache."
+            "Default: the shared per-user AniAnn's cache."
         ),
     )
     annotate_parser.add_argument(
@@ -236,7 +930,19 @@ def get_parser():
         "-p",
         "--plot",
         action="store_true",
-        help="Output self-identity dotplot(s) for each sequence.",
+        help=(
+            "Save a low-resolution self-identity heatmap for each band under "
+            "<output directory>/matrix_plots."
+        ),
+    )
+    annotate_parser.add_argument(
+        "--distal",
+        action="store_true",
+        help=(
+            "Detect distal satellite links, validate unmatched axes, and union "
+            "linked satellites in the DSU. With --plot, detected links are "
+            "outlined in red."
+        ),
     )
     annotate_group = annotate_parser.add_mutually_exclusive_group()
     annotate_group.add_argument(
@@ -293,26 +999,55 @@ def get_parser():
     ntrprism_parser.add_argument(
         "-f",
         "--fasta",
-        default=argparse.SUPPRESS,
-        help="Path to input fasta file(s).",
+        help="Path to one indexed FASTA file.",
         required=True,
-        nargs="+",
     )
     ntrprism_parser.add_argument(
         "-s",
         "--seq_id",
-        nargs="+",
-        default=None,
-        help="Sequence ID to extract (multiple if using multifasta file). Will ignore if not found.",
+        required=True,
+        help="Sequence ID containing the region of interest.",
     )
     ntrprism_parser.add_argument(
         "-r",
         "--range",
-        default=None,
+        required=True,
         type=int,
         nargs=2,
         metavar=("START", "END"),
-        help="Genomic range as two integers (start end). If omitted, the full sequence is used.",
+        help="Region as 0-based, half-open coordinates: START END.",
+    )
+    ntrprism_parser.add_argument(
+        "-d",
+        "--directory",
+        default=None,
+        help=(
+            "Output directory used with --save. Default: current directory."
+        ),
+    )
+    ntrprism_parser.add_argument(
+        "-k",
+        "--kmer",
+        type=int,
+        default=21,
+        help="K-mer length used to calculate repeated-k-mer spacings. Default: 21.",
+    )
+    ntrprism_parser.add_argument(
+        "--merge-distance",
+        type=int,
+        default=1,
+        help="Maximum gap in bp between neighboring spacing values merged into one peak.",
+    )
+    ntrprism_parser.add_argument(
+        "--save",
+        action="store_true",
+        help="Save the text report and PNG histogram in addition to terminal output.",
+    )
+    ntrprism_parser.add_argument(
+        "-q",
+        "--quiet",
+        action="store_true",
+        help="Suppress the terminal report (use with --save for files only).",
     )
 
     return parser
@@ -433,9 +1168,16 @@ def main():
 
         # Prep args
         band_height = int(args.band * 1_000_000)
-        interval = (args.window + 1) // 2
+        try:
+            windows = derive_window_sizes(args.window)
+        except ValueError as error:
+            print(f"[ERROR] Invalid --window values: {error}.", file=sys.stderr)
+            raise SystemExit(1)
+        win = windows[0]
+        additional_windows = windows[1:]
+        interval = (win + 1) // 2
         directory = args.directory or os.getcwd()
-        hash_cache_dir = args.cache_dir or os.path.join(directory, ".anianns_cache")
+        hash_cache_dir = args.cache_dir or str(default_hash_cache_dir())
 
         if not args.quiet:
             label_width = 20
@@ -444,7 +1186,12 @@ def main():
             print(f"{'K-mer length:':<{label_width}} {args.kmer}")
             print(f"{'Sketch modulo:':<{label_width}} {args.sketch}")
             print(f"{'Band height:':<{label_width}} {band_height} bp")
-            print(f"{'Window size:':<{label_width}} {args.window} bp")
+            print(f"{'Plot matrices:':<{label_width}} {args.plot}")
+            print(f"{'Distal links:':<{label_width}} {args.distal}")
+            print(
+                f"{'Window sizes:':<{label_width}} "
+                f"{', '.join(str(window) for window in windows)} bp"
+            )
             print(f"{'ANI threshold:':<{label_width}} {args.identity} %")
             print(f"{'Hash cache:':<{label_width}} {hash_cache_dir}")
             print(
@@ -480,13 +1227,12 @@ def main():
         # 3) Open all FASTAs once
         fasta_handles = {f: pysam.FastaFile(f) for f, _ in pairs}
         try:
+            satellite_dsu = SatelliteDSU()
             # cache everything into locals
             k_param = args.kmer
-            win = args.window
             verbosity = args.verbose
             build_sets = build_kmer_sets
-            imat = intersection_matrix if args.plot else intersection_matrix_thresholded
-            imat_inv = intersection_matrix_inverted
+            imat = intersection_matrix_thresholded
             get_span = get_diagonal_span
             merge_intv = merge_shared_boundaries
 
@@ -494,8 +1240,30 @@ def main():
             for fasta, seq_ids in pairs:
                 fh = fasta_handles[fasta]
                 for seq_id in seq_ids:
+                    sequence_started = time.perf_counter()
+                    stage_times = {
+                        "hash_wait": 0.0,
+                        "sketch": 0.0,
+                        "scan": 0.0,
+                        "candidates": 0.0,
+                        "refinement": 0.0,
+                        "output": 0.0,
+                    }
                     # Define data structure for satellite coordinates. Variable names for sequence name, length, and if samtools was used for coordinates
                     satellite_coordinate_list = []
+                    additional_window_candidates = []
+                    distal_link_list = []
+                    distal_accumulator = (
+                        CandidateNeighborhoodAccumulator(
+                            window=win,
+                            k=k_param,
+                            identity=args.identity,
+                            halo_windows=2,
+                            skip_adjacent_groups=True,
+                        )
+                        if args.distal
+                        else None
+                    )
                     seq_len = fh.get_reference_length(seq_id)
                     seq_bounds = define_bounds(seq_id)
 
@@ -522,7 +1290,7 @@ def main():
                         sequence_length=seq_len,
                         kmer=k_param,
                         band_height=sequence_band_height,
-                        windows=(win,),
+                        windows=windows,
                     )
                     n_windows = band_plan.band_count
                     max_len = band_plan.window_plans[win].max_len
@@ -535,8 +1303,15 @@ def main():
                         )
                     )
                     try:
+                        hash_wait_started = time.perf_counter()
                         first_band = next(band_iterator)
+                        stage_times["hash_wait"] += (
+                            time.perf_counter() - hash_wait_started
+                        )
                     except StopIteration:
+                        stage_times["hash_wait"] += (
+                            time.perf_counter() - hash_wait_started
+                        )
                         continue
 
                     if not args.quiet:
@@ -550,22 +1325,64 @@ def main():
 
                     # Create initial window
                     kmers_list = band_plan.hashes_for_window(first_band, win)
-                    prev_ov, prev_nov = build_sets(
-                        kmers_list, max_len, win, interval, sketch=args.sketch
-                    )
+                    first_band_sketches = None
+                    if additional_windows:
+                        first_band_sketches, sketch_runtime = (
+                            build_band_window_sketches(
+                                first_band, band_plan, windows, sketch=args.sketch
+                            )
+                        )
+                        prev_ov, prev_nov = first_band_sketches[win]
+                        stage_times["sketch"] += sketch_runtime
+                    else:
+                        sketch_started = time.perf_counter()
+                        prev_ov, prev_nov = build_sets(
+                            kmers_list, max_len, win, interval, sketch=args.sketch
+                        )
+                        stage_times["sketch"] += (
+                            time.perf_counter() - sketch_started
+                        )
                     matrix_started = time.perf_counter()
                     initial_matrix = (
-                        imat(prev_ov, prev_nov, k_param)
-                        if args.plot
-                        else imat(prev_ov, prev_nov, k_param, args.identity)
+                        imat(prev_ov, prev_nov, k_param, args.identity)
+                        if args.plot or args.distal
+                        else None
+                    )
+                    spans = get_diagonal_span_from_sets(
+                        prev_ov,
+                        prev_nov,
+                        win,
+                        k_param,
+                        args.identity,
+                        zero_tol=2,
                     )
                     previous_matrix_runtime = time.perf_counter() - matrix_started
+                    stage_times["scan"] += previous_matrix_runtime
                     if verbosity:
                         print(
                             format_matrix_runtime(
                                 1, n_windows, previous_matrix_runtime
                             )
                         )
+
+                    (
+                        first_additional_candidates,
+                        additional_sketch_runtime,
+                        additional_scan_runtime,
+                    ) = scan_additional_window_candidates(
+                        first_band,
+                        band_plan,
+                        additional_windows,
+                        kmer=k_param,
+                        identity=args.identity,
+                        sketch=args.sketch,
+                        prebuilt_sketches=first_band_sketches,
+                    )
+                    additional_window_candidates.extend(
+                        first_additional_candidates
+                    )
+                    stage_times["sketch"] += additional_sketch_runtime
+                    stage_times["scan"] += additional_scan_runtime
 
                     if n_windows > 1:
                         if not args.quiet:
@@ -576,41 +1393,114 @@ def main():
                                 suffix="Complete",
                                 length=40,
                             )
-                        # Get spans for the initial window
-                        initial_detection_matrix = (
-                            initial_matrix >= args.identity
-                            if args.plot
-                            else initial_matrix
-                        )
-                        spans = get_span(initial_detection_matrix, win, zero_tol=2)
-
                         # TODO: Remove low count spans
                         """for element in spans:
                             print(element, element[1], element[1]*win, element[0][1]-element[0][0])"""
 
                         # Replace 0 here with start prefix
-                        for coordinates in merge_intv(
+                        candidates_started = time.perf_counter()
+                        initial_candidates = merge_intv(
                             intervals=spans, prefix=0, window=win, verbose=False
-                        ):
-                            satellite_coordinate_list.append(coordinates)
+                        )
+                        satellite_coordinate_list.extend(initial_candidates)
+                        previous_candidates = initial_candidates
+                        previous_prefix = 0
+                        distal_candidates = combine_band_candidates(
+                            initial_candidates,
+                            first_additional_candidates,
+                            first_band.start,
+                        )
+                        if distal_accumulator is not None:
+                            distal_accumulator.add_band(
+                                prev_ov,
+                                prev_nov,
+                                distal_candidates,
+                                prefix=0,
+                                threshold_matrix=initial_matrix,
+                            )
+                            distal_link_list.extend(
+                                detect_candidate_to_all_links_from_full_matrix(
+                                    initial_matrix,
+                                    distal_candidates,
+                                    0,
+                                    win,
+                                )
+                            )
+                        plot_links = []
+                        if args.distal:
+                            plot_links = detect_matrix_distal_links(
+                                initial_matrix,
+                                first_band.start,
+                                win,
+                                distal_candidates,
+                            )
+                            distal_link_list.extend(plot_links)
+                        if args.plot:
+                            heatmap_path = save_matrix_heatmap(
+                                initial_matrix,
+                                directory,
+                                seq_id,
+                                1,
+                                first_band.start,
+                                win,
+                                args.identity,
+                                distal_links=plot_links,
+                            )
+                            if not args.quiet:
+                                print(f"Saved matrix heatmap to {heatmap_path}")
+                        stage_times["candidates"] += (
+                            time.perf_counter() - candidates_started
+                        )
                         # Iterate through independently fetched/hash-overlapped bands.
                         # The producer queues one future band while this process
                         # performs the current band's matrix work.
-                        for hashed_band in band_iterator:
+                        for hashed_band in iter_with_stage_timing(
+                            band_iterator, stage_times, "hash_wait"
+                        ):
                             w = hashed_band.index + 1
                             kmers_list = band_plan.hashes_for_window(hashed_band, win)
 
-                            ov, nov = build_sets(
-                                kmers_list, max_len, win, interval, sketch=args.sketch
-                            )
+                            band_sketches = None
+                            if additional_windows:
+                                band_sketches, sketch_runtime = (
+                                    build_band_window_sketches(
+                                        hashed_band,
+                                        band_plan,
+                                        windows,
+                                        sketch=args.sketch,
+                                    )
+                                )
+                                ov, nov = band_sketches[win]
+                                stage_times["sketch"] += sketch_runtime
+                            else:
+                                sketch_started = time.perf_counter()
+                                ov, nov = build_sets(
+                                    kmers_list,
+                                    max_len,
+                                    win,
+                                    interval,
+                                    sketch=args.sketch,
+                                )
+                                stage_times["sketch"] += (
+                                    time.perf_counter() - sketch_started
+                                )
 
                             matrix_started = time.perf_counter()
                             updated_matrix = (
-                                imat(ov, nov, k_param)
-                                if args.plot
-                                else imat(ov, nov, k_param, args.identity)
+                                imat(ov, nov, k_param, args.identity)
+                                if args.plot or args.distal
+                                else None
+                            )
+                            new_spans = get_diagonal_span_from_sets(
+                                ov,
+                                nov,
+                                win,
+                                k_param,
+                                args.identity,
+                                zero_tol=2,
                             )
                             matrix_runtime = time.perf_counter() - matrix_started
+                            stage_times["scan"] += matrix_runtime
                             if verbosity:
                                 print(
                                     format_matrix_runtime(
@@ -622,63 +1512,132 @@ def main():
                                 )
                             previous_matrix_runtime = matrix_runtime
 
-                            if args.plot:
-                                inv = imat_inv(
-                                    initial_matrix,
-                                    updated_matrix,
-                                    prev_ov,
-                                    prev_nov,
-                                    ov,
-                                    nov,
-                                    k_param,
-                                )
-                                inv[inv < args.identity] = 0
-                                plot_matrix(inv)
-                                os.makedirs(directory, exist_ok=True)
-                                matrix_filename = os.path.join(
-                                    directory, f"{seq_id}_{w}_matrix.npy"
-                                )
-                                np.save(matrix_filename, inv)
-                                if not args.quiet:
-                                    print(f"Saved matrix to {matrix_filename}")
-                                M_diag, M_distal = split_diagonal_attached(inv)
-                                diag_filename = os.path.join(
-                                    directory, f"{seq_id}_diag_{w}_matrix.npy"
-                                )
-                                np.save(diag_filename, M_diag)
-                                distal_filename = os.path.join(
-                                    directory, f"{seq_id}_distal_{w}_matrix.npy"
-                                )
-                                np.save(distal_filename, M_distal)
-
-                            updated_detection_matrix = (
-                                updated_matrix >= args.identity
-                                if args.plot
-                                else updated_matrix
-                            )
-                            new_spans = get_span(
-                                updated_detection_matrix, win, zero_tol=2
-                            )
                             prefix_amount = hashed_band.start
 
                             # print(new_spans)
                             """if verbosity:
                                 print(f"Current prefix: {prefix_amount}\n")"""
-                            for coordinates in merge_intv(
+                            candidates_started = time.perf_counter()
+                            local_candidates = merge_intv(
                                 intervals=new_spans,
-                                prefix=prefix_amount,
+                                prefix=0,
                                 window=win,
                                 verbose=False,
-                            ):
-                                satellite_coordinate_list.append(coordinates)
-                            """probes = sobel_with_diagonal_probes(
-                                M = inv,
-                                thresh = 0.7,
-                                min_thick = 1,
-                            )"""
-                            # print(sobel_spans(probes,win))
+                            )
+                            satellite_coordinate_list.extend(
+                                (x + prefix_amount, y + prefix_amount, count)
+                                for x, y, count in local_candidates
+                            )
+                            (
+                                band_additional_candidates,
+                                additional_sketch_runtime,
+                                additional_scan_runtime,
+                            ) = scan_additional_window_candidates(
+                                hashed_band,
+                                band_plan,
+                                additional_windows,
+                                kmer=k_param,
+                                identity=args.identity,
+                                sketch=args.sketch,
+                                prebuilt_sketches=band_sketches,
+                            )
+                            additional_window_candidates.extend(
+                                band_additional_candidates
+                            )
+                            stage_times["sketch"] += additional_sketch_runtime
+                            stage_times["scan"] += additional_scan_runtime
+                            if args.distal:
+                                bridge = detect_adjacent_band_bridge(
+                                    prev_ov,
+                                    prev_nov,
+                                    previous_candidates,
+                                    previous_prefix,
+                                    ov,
+                                    nov,
+                                    local_candidates,
+                                    prefix_amount,
+                                    win,
+                                    k_param,
+                                    args.identity,
+                                )
+                                distal_link_list.extend(bridge.links)
+                                incorporate_seam_candidates(
+                                    satellite_coordinate_list,
+                                    bridge.seam_candidates,
+                                    win,
+                                )
+                                if args.plot and (
+                                    bridge.links or bridge.seam_candidates
+                                ):
+                                    pair_path = save_adjacent_matrix_heatmap(
+                                        initial_matrix,
+                                        updated_matrix,
+                                        bridge.cross_matrix,
+                                        directory,
+                                        seq_id,
+                                        w - 1,
+                                        w,
+                                        previous_prefix,
+                                        win,
+                                        distal_links=bridge.links,
+                                        seam_candidates=bridge.seam_candidates,
+                                    )
+                                    if not args.quiet:
+                                        print(
+                                            f"Saved adjacent matrix heatmap to {pair_path}"
+                                        )
+                            if distal_accumulator is not None:
+                                distal_candidates = combine_band_candidates(
+                                    local_candidates,
+                                    band_additional_candidates,
+                                    prefix_amount,
+                                )
+                                distal_accumulator.add_band(
+                                    ov,
+                                    nov,
+                                    distal_candidates,
+                                    prefix=prefix_amount,
+                                    threshold_matrix=updated_matrix,
+                                )
+                                distal_link_list.extend(
+                                    detect_candidate_to_all_links_from_full_matrix(
+                                        updated_matrix,
+                                        distal_candidates,
+                                        prefix_amount,
+                                        win,
+                                    )
+                                )
+                            else:
+                                distal_candidates = local_candidates
+                            plot_links = []
+                            if args.distal:
+                                plot_links = detect_matrix_distal_links(
+                                    updated_matrix,
+                                    prefix_amount,
+                                    win,
+                                    distal_candidates,
+                                )
+                                distal_link_list.extend(plot_links)
+                            if args.plot:
+                                heatmap_path = save_matrix_heatmap(
+                                    updated_matrix,
+                                    directory,
+                                    seq_id,
+                                    w,
+                                    prefix_amount,
+                                    win,
+                                    args.identity,
+                                    distal_links=plot_links,
+                                )
+                                if not args.quiet:
+                                    print(f"Saved matrix heatmap to {heatmap_path}")
+                            stage_times["candidates"] += (
+                                time.perf_counter() - candidates_started
+                            )
                             # Roll matrices forward
                             initial_matrix, prev_ov, prev_nov = updated_matrix, ov, nov
+                            previous_candidates = local_candidates
+                            previous_prefix = prefix_amount
 
                             # Update progress bar
                             if not args.quiet:
@@ -701,35 +1660,150 @@ def main():
 
                     else:
                         # No progress bar in this case
-                        initial_detection_matrix = (
-                            initial_matrix >= args.identity
-                            if args.plot
-                            else initial_matrix
-                        )
-                        spans = get_span(initial_detection_matrix, win, zero_tol=2)
-
-                        if args.plot:
-                            initial_matrix[initial_matrix < args.identity] = 0
-                            plot_matrix(initial_matrix)
-                            M_diag, M_distal = split_diagonal_attached(initial_matrix)
-
-                        for coordinates in merge_intv(
+                        candidates_started = time.perf_counter()
+                        initial_candidates = merge_intv(
                             intervals=spans, prefix=0, window=win, verbose=False
-                        ):
-                            # Append only if the counts pass a threshold
-                            # Counting threshold function here
-                            satellite_coordinate_list.append(coordinates)
+                        )
+                        satellite_coordinate_list.extend(initial_candidates)
+                        distal_candidates = combine_band_candidates(
+                            initial_candidates,
+                            first_additional_candidates,
+                            first_band.start,
+                        )
+                        if distal_accumulator is not None:
+                            distal_accumulator.add_band(
+                                prev_ov,
+                                prev_nov,
+                                distal_candidates,
+                                prefix=0,
+                                threshold_matrix=initial_matrix,
+                            )
+                            distal_link_list.extend(
+                                detect_candidate_to_all_links_from_full_matrix(
+                                    initial_matrix,
+                                    distal_candidates,
+                                    0,
+                                    win,
+                                )
+                            )
+                        plot_links = []
+                        if args.distal:
+                            plot_links = detect_matrix_distal_links(
+                                initial_matrix,
+                                first_band.start,
+                                win,
+                                distal_candidates,
+                            )
+                            distal_link_list.extend(plot_links)
+                        if args.plot:
+                            heatmap_path = save_matrix_heatmap(
+                                initial_matrix,
+                                directory,
+                                seq_id,
+                                1,
+                                first_band.start,
+                                win,
+                                args.identity,
+                                distal_links=plot_links,
+                            )
+                            if not args.quiet:
+                                print(f"Saved matrix heatmap to {heatmap_path}")
+                        stage_times["candidates"] += (
+                            time.perf_counter() - candidates_started
+                        )
 
-                    filtered = []
-                    for x, y, count in satellite_coordinate_list:
-                        size = y - x
-                        count_size = count * win
-                        if (count_size <= size * 0.6) or (
-                            count < 10 and count_size <= size * 0.75
-                        ):
-                            continue
-                        filtered.append((x, y, count))
+                    # Exhausting the producer commits a newly generated full-sequence
+                    # hash cache. A warm cache is simply exhausted already.
+                    for _ in iter_with_stage_timing(
+                        band_iterator, stage_times, "hash_wait"
+                    ):
+                        pass
+                    sequence_hashes = load_cached_sequence_hashes(
+                        hash_cache_dir,
+                        fasta,
+                        seq_id,
+                        seq_len,
+                        k_param,
+                    )
+
+                    candidates_started = time.perf_counter()
+                    all_window_candidates = additional_window_candidates + [
+                        WindowCandidate(start, end, count, win)
+                        for start, end, count in satellite_coordinate_list
+                    ]
+                    selected_window_candidates = select_multi_window_candidates(
+                        all_window_candidates
+                    )
+                    filtered = [
+                        (candidate.start, candidate.end, candidate.count)
+                        for candidate in selected_window_candidates
+                    ]
+                    candidate_windows = [
+                        candidate.window for candidate in selected_window_candidates
+                    ]
                     satellite_coordinate_list = filtered
+                    if len(windows) > 1:
+                        os.makedirs(directory, exist_ok=True)
+                        audit_candidates = selected_window_candidates
+                        if seq_bounds:
+                            coordinate_offset = int(seq_bounds[1])
+                            audit_candidates = [
+                                WindowCandidate(
+                                    candidate.start + coordinate_offset,
+                                    candidate.end + coordinate_offset,
+                                    candidate.count,
+                                    candidate.window,
+                                )
+                                for candidate in selected_window_candidates
+                            ]
+                        selection_path = write_window_selection(
+                            os.path.join(directory, f"{seq_id}_window_selection.tsv"),
+                            audit_candidates,
+                        )
+                        if verbosity:
+                            print(f"Saved multi-window selections to {selection_path}")
+                    if distal_accumulator is not None:
+                        neighborhood = distal_accumulator.build(
+                            satellite_coordinate_list
+                        )
+                        os.makedirs(directory, exist_ok=True)
+                        neighborhood_path = os.path.join(
+                            directory, f"{seq_id}_distal_neighborhood.npz"
+                        )
+                        np.savez_compressed(
+                            neighborhood_path,
+                            matrix=neighborhood.matrix,
+                            genomic_window_starts=neighborhood.genomic_window_starts,
+                            candidate_ranges=np.asarray(
+                                neighborhood.candidate_ranges, dtype=np.int64
+                            ).reshape(-1, 2),
+                            window=np.int64(win),
+                            halo_windows=np.int64(2),
+                            identity=np.int64(args.identity),
+                        )
+                        distal_link_list.extend(
+                            detect_distal_links(
+                                neighborhood.matrix,
+                                neighborhood.genomic_window_starts,
+                                neighborhood.candidate_ranges,
+                                win,
+                            )
+                        )
+                        if verbosity:
+                            print(
+                                f"Saved {neighborhood.matrix.shape[0]}-window distal "
+                                f"neighborhood matrix to {neighborhood_path}"
+                            )
+                    if args.distal:
+                        distal_link_list = filter_candidate_distal_links(
+                            distal_link_list,
+                            satellite_coordinate_list,
+                            proximity=2 * win,
+                        )
+                        distal_link_list = deduplicate_distal_links(distal_link_list)
+                    stage_times["candidates"] += (
+                        time.perf_counter() - candidates_started
+                    )
                     # print(satellite_coordinate_list)
                     # sys.exit(0)
                     if seq_bounds:
@@ -815,6 +1889,7 @@ def main():
                     df_converted.write_csv(annotation_file_path, separator="\t")"""
 
                     # If we are using a subseqeunce of a larger fasta, we need to adjust the coordinates back to the original reference frame before outputting
+                    refinement_started = time.perf_counter()
                     if seq_bounds:
                         # fa, seq_id, seq_len, band, offset, window, k, df: pl.DataFrame, classify, verbose, quiet) -> None:
                         tuple_of_lists = report_borders(
@@ -829,6 +1904,8 @@ def main():
                             classify=args.classify,
                             verbose=verbosity,
                             quiet=args.quiet,
+                            sequence_hashes=sequence_hashes,
+                            candidate_windows=candidate_windows,
                         )
                         (
                             new_starts,
@@ -852,6 +1929,8 @@ def main():
                             classify=args.classify,
                             verbose=verbosity,
                             quiet=args.quiet,
+                            sequence_hashes=sequence_hashes,
+                            candidate_windows=candidate_windows,
                         )
                         (
                             new_starts,
@@ -862,8 +1941,98 @@ def main():
                             hor,
                         ) = tuple_of_lists
                         # print(tuple_of_lists)
+                    stage_times["refinement"] += (
+                        time.perf_counter() - refinement_started
+                    )
 
                     # Replace the columns in df1
+                    output_started = time.perf_counter()
+                    coordinate_offset = int(seq_bounds[1]) if seq_bounds else 0
+                    refined_candidates = list(zip(new_starts, new_ends))
+                    if args.distal:
+                        distal_link_list = filter_candidate_distal_links(
+                            distal_link_list,
+                            refined_candidates,
+                            proximity=2 * win,
+                        )
+                        distal_link_list = snap_distal_links_to_candidates(
+                            distal_link_list,
+                            refined_candidates,
+                        )
+                        distal_link_list = promote_unmatched_distal_candidates(
+                            distal_link_list,
+                            new_starts,
+                            new_ends,
+                            new_names,
+                            monomer,
+                            periodicity,
+                            hor,
+                            fasta_file=fh,
+                            seq_id=seq_id,
+                            seq_len=seq_len,
+                            window=win,
+                            k=k_param,
+                            sequence_hashes=sequence_hashes,
+                            verbose=verbosity,
+                        )
+                        refined_candidates = list(zip(new_starts, new_ends))
+                        tuple_of_lists = (
+                            new_starts,
+                            new_ends,
+                            new_names,
+                            monomer,
+                            periodicity,
+                            hor,
+                        )
+                    for (
+                        satellite_start,
+                        satellite_end,
+                        satellite_name,
+                        satellite_monomer,
+                        satellite_periodicity,
+                        satellite_is_hor,
+                    ) in zip(
+                        new_starts,
+                        new_ends,
+                        new_names,
+                        monomer,
+                        periodicity,
+                        hor,
+                    ):
+                        satellite_dsu.add_satellite(
+                            seq_id,
+                            satellite_start + coordinate_offset,
+                            satellite_end + coordinate_offset,
+                            name=satellite_name,
+                            monomer=satellite_monomer,
+                            periodicity=satellite_periodicity,
+                            is_hor=satellite_is_hor,
+                        )
+                    if args.distal:
+                        for link in distal_link_list:
+                            satellite_dsu.union_by_coordinates(
+                                seq_id,
+                                link.start1 + coordinate_offset,
+                                link.end1 + coordinate_offset,
+                                seq_id,
+                                link.start2 + coordinate_offset,
+                                link.end2 + coordinate_offset,
+                            )
+                        distal_links_path = os.path.join(
+                            directory, f"{seq_id}_distal_links.bedpe"
+                        )
+                        os.makedirs(directory, exist_ok=True)
+                        write_distal_links(
+                            distal_link_list,
+                            seq_id,
+                            distal_links_path,
+                            coordinate_offset=coordinate_offset,
+                        )
+                        if not args.quiet:
+                            print(
+                                f"Saved {len(distal_link_list)} distal satellite "
+                                f"link(s) to {distal_links_path}"
+                            )
                     if seq_bounds:
                         offset = int(seq_bounds[1])
                         df2 = pl.DataFrame(
@@ -902,52 +2071,44 @@ def main():
                     csvfilename = f"{seq_id}.csv"
                     csvfilepath = os.path.join(directory, csvfilename)
                     write_summary_file(tuple_of_lists, csvfilepath)
+                    stage_times["output"] += time.perf_counter() - output_started
+
+                    if verbosity:
+                        total_runtime = time.perf_counter() - sequence_started
+                        print(f"Stage timings for {seq_id}:")
+                        print(
+                            f"  hash/cache wait:    {stage_times['hash_wait']:.3f} s"
+                        )
+                        print(f"  sketch construction:{stage_times['sketch']:9.3f} s")
+                        print(f"  diagonal scan:      {stage_times['scan']:9.3f} s")
+                        print(
+                            f"  candidate handling: {stage_times['candidates']:9.3f} s"
+                        )
+                        print(
+                            f"  boundary refinement:{stage_times['refinement']:9.3f} s"
+                        )
+                        print(f"  output:             {stage_times['output']:9.3f} s")
+                        print(f"  total:              {total_runtime:9.3f} s")
 
                     print(
                         f"Successfully finished annotating {seq_id} to {bedfilepath}\n"
                     )
+
+            satellite_dsu_path = os.path.join(directory, "satellite_dsu.tsv")
+            satellite_dsu_text_path = os.path.join(directory, "satellite_dsu.txt")
+            os.makedirs(directory, exist_ok=True)
+            satellite_dsu.write_tsv(satellite_dsu_path)
+            satellite_dsu.write_text(satellite_dsu_text_path)
+            if not args.quiet:
+                print(
+                    f"Saved {len(satellite_dsu.satellites)} satellite DSU member(s) "
+                    f"to {satellite_dsu_path} and {satellite_dsu_text_path}"
+                )
 
         except Exception as e:
             print(e)
 
     # -------- NTRPRISM LOGIC --------#
     elif args.command == "ntrprism":
-        if args.range is not None:
-            start, end = args.range
-            for fasta_path in args.fasta:
-                fh = pysam.FastaFile(fasta_path)
-                seq_ids = args.seq_id if args.seq_id else fh.references
-                for seq_id in seq_ids:
-                    seq_len = fh.get_reference_length(seq_id)
-                    error = validate_ntrprism_range(start, end, seq_len)
-                    if error:
-                        print(error)
-                        sys.exit(1)
-                fh.close()
-
-            headers = get_input_headers(args.fasta)
-        if args.seq_id:
-            pairs = []
-            for sid in args.seq_id:
-                matches = [f for f, ids in headers if sid in ids]
-                if matches:
-                    pairs.append((matches[0], [sid]))
-                else:
-                    # Check if there's sequence bounds for this seq_id
-                    seq_bounds = define_bounds(sid)
-                    if seq_bounds:
-                        # print(seq_bounds)
-                        matches = [f for f, ids in headers if seq_bounds[0] in ids]
-                        if matches:
-                            pairs.append((matches[0], [sid]))
-                        else:
-                            if not args.quiet:
-                                print(f"Unable to locate {seq_bounds}. Skipping…")
-                    else:
-                        if not args.quiet:
-                            print(f"Unable to locate {sid}. Skipping…")
-        else:
-            pairs = headers
-
-        # 3) Open all FASTAs once
-        fasta_handles = {f: pysam.FastaFile(f) for f, _ in pairs}
+        run_ntrprism_command(args)
+        return 0

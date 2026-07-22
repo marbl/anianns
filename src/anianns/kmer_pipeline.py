@@ -7,18 +7,39 @@ import math
 import multiprocessing
 import os
 from pathlib import Path
+import sys
 import tempfile
 from typing import Dict, Iterable, Iterator, Sequence
 
 import mmh3
 import numpy as np
 import pysam
+from numba import njit, prange
 
 from anianns.kmer_utils import tab_b
 
 
 AMBIGUOUS_BASES = frozenset("RYMKSWHBVDN")
 HASH_CACHE_VERSION = 1
+
+
+def default_hash_cache_dir() -> Path:
+    """Return a persistent per-user cache shared by annotation outputs."""
+    configured = os.environ.get("ANIANNS_CACHE_DIR")
+    if configured:
+        return Path(configured).expanduser()
+
+    if sys.platform == "darwin":
+        cache_root = Path.home() / "Library" / "Caches"
+    elif os.name == "nt":
+        cache_root = Path(
+            os.environ.get("LOCALAPPDATA", Path.home() / "AppData" / "Local")
+        )
+    else:
+        cache_root = Path(
+            os.environ.get("XDG_CACHE_HOME", Path.home() / ".cache")
+        )
+    return cache_root / "anianns" / "hashes"
 
 
 @dataclass(frozen=True)
@@ -52,10 +73,9 @@ class SequenceBandPlan:
     """
     Plan shared k-mer batches for one or more prospective window sizes.
 
-    Annotation currently supplies exactly one window size. Accepting several
-    here lays the data-flow foundation for a future multi-window mode: each
-    FASTA band is fetched and hashed once with enough right-hand overlap for
-    the largest requested window, and each window consumes only its own view.
+    Each FASTA band is fetched and hashed once with enough right-hand overlap
+    for the largest requested window, and each resolution consumes only its
+    own view of that shared hash stream.
     """
 
     def __init__(
@@ -150,6 +170,80 @@ def canonical_kmer_hashes(sequence: str, kmer: int) -> np.ndarray:
     return hashes
 
 
+@njit(cache=True, inline="always")
+def _rotate_left_32(value, shift):
+    return np.uint32((value << shift) | (value >> (32 - shift)))
+
+
+@njit(cache=True, inline="always")
+def _finalize_murmurhash3_32(value):
+    value ^= value >> 16
+    value = np.uint32(value * np.uint32(0x85EBCA6B))
+    value ^= value >> 13
+    value = np.uint32(value * np.uint32(0xC2B2AE35))
+    value ^= value >> 16
+    return value
+
+
+@njit(cache=True, parallel=True)
+def _forward_murmurhash3_windows(sequence_bytes, kmer, seed):
+    total_kmers = len(sequence_bytes) - kmer + 1
+    hashes = np.empty(max(0, total_kmers), dtype=np.int32)
+    c1 = np.uint32(0xCC9E2D51)
+    c2 = np.uint32(0x1B873593)
+
+    for start in prange(total_kmers):
+        value = np.uint32(seed)
+        block_count = kmer // 4
+        for block in range(block_count):
+            offset = start + (block * 4)
+            block_value = np.uint32(
+                np.uint32(sequence_bytes[offset])
+                | (np.uint32(sequence_bytes[offset + 1]) << 8)
+                | (np.uint32(sequence_bytes[offset + 2]) << 16)
+                | (np.uint32(sequence_bytes[offset + 3]) << 24)
+            )
+            block_value = np.uint32(block_value * c1)
+            block_value = _rotate_left_32(block_value, 15)
+            block_value = np.uint32(block_value * c2)
+            value ^= block_value
+            value = _rotate_left_32(value, 13)
+            value = np.uint32(value * np.uint32(5) + np.uint32(0xE6546B64))
+
+        tail_offset = start + (block_count * 4)
+        tail_size = kmer & 3
+        tail = np.uint32(0)
+        if tail_size == 3:
+            tail ^= np.uint32(sequence_bytes[tail_offset + 2]) << 16
+        if tail_size >= 2:
+            tail ^= np.uint32(sequence_bytes[tail_offset + 1]) << 8
+        if tail_size >= 1:
+            tail ^= np.uint32(sequence_bytes[tail_offset])
+            tail = np.uint32(tail * c1)
+            tail = _rotate_left_32(tail, 15)
+            tail = np.uint32(tail * c2)
+            value ^= tail
+
+        value ^= np.uint32(kmer)
+        value = _finalize_murmurhash3_32(value)
+        if value >= np.uint32(0x80000000):
+            hashes[start] = np.int32(np.int64(value) - 0x100000000)
+        else:
+            hashes[start] = np.int32(value)
+
+    return hashes
+
+
+def forward_kmer_hashes(sequence: str, kmer: int) -> np.ndarray:
+    """Batch forward-only mmh3 hashes without allocating k-mer substrings."""
+    if kmer <= 0:
+        raise ValueError("kmer must be positive")
+    encoded = np.frombuffer(sequence.upper().encode("ascii"), dtype=np.uint8)
+    if len(encoded) < kmer:
+        return np.empty(0, dtype=np.int32)
+    return _forward_murmurhash3_windows(encoded, kmer, 42)
+
+
 _FASTA_HANDLE_CACHE = {}
 
 
@@ -205,6 +299,27 @@ def _load_cached_hashes(cache_path: Path, total_kmers: int):
     if hashes.dtype != np.int32 or hashes.shape != (total_kmers,):
         return None
     return hashes
+
+
+def load_cached_sequence_hashes(
+    cache_dir: str,
+    fasta_path: str,
+    seq_id: str,
+    sequence_length: int,
+    kmer: int,
+):
+    """Load the complete canonical hash vector when a valid cache is present."""
+    if cache_dir is None:
+        return None
+    try:
+        cache_path = hash_cache_path(
+            cache_dir, fasta_path, seq_id, sequence_length, kmer
+        )
+    except OSError:
+        return None
+    return _load_cached_hashes(
+        cache_path, max(0, sequence_length - kmer + 1)
+    )
 
 
 def _iter_uncached_hashed_fasta_bands(

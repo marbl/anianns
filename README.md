@@ -148,11 +148,37 @@ Minimum sequence identity cutoff threshold when running ModDotPlot. While it is 
 
 `-w / --window <INT>`
 
-Dotplot window size, or the number of bp contained within each pixel in a plot. This is proportional to the sensitivity of satellite detection (ie. lower is more accurate, at the expense of runtime). **Default: 2000.**
+The central dotplot window size. AniAnn's automatically scans half, the supplied
+value, and double the supplied value. For example, `-w 5000` scans windows of
+2500, 5000, and 10000 bp. AniAnn's hashes each sequence band once, scans the
+additional resolutions without dense matrices, reconciles overlapping calls,
+and boundary-refines only the winning call at each locus. It also writes a
+`<sequence>_window_selection.tsv` audit file recording the chosen resolution.
+Comparable spans favor the finer resolution; a coarser call wins when it
+recovers materially more supported array sequence.
+**Default: 2000 (scans 1000, 2000, and 4000).**
 
 `--band <FLOAT>`
 
-Instead of creating a full NxN matrix (where N is sequence size), _AniAnn's_ uses a banded matrix to reduce runtime. The size of the band can be adjusted here (units in megabases). Increasing this amount will improve the detection of off-target satellite arrays, at the expense of runtime. **Default: 2.**
+_AniAnn's_ streams the sequence in bands of this many megabases. Normal
+annotation scans outward from the diagonal without materializing a full band
+matrix; `--plot` or `--distal` creates the primary-resolution matrix needed for
+visualization or distal-link detection. **Default: 2.**
+
+`--cache-dir <DIR>`
+
+Directory for reusable canonical k-mer hashes. By default, AniAnn's uses a
+persistent per-user cache shared by every output directory. Set
+`ANIANNS_CACHE_DIR` to change that shared location globally, or use this option
+for one run.
+
+Every annotation run also writes `satellite_dsu.tsv` and a human-readable
+`satellite_dsu.txt`. Each boundary-refined
+satellite is a DSU node, including unlinked singletons. With `--distal`,
+validated distal links
+union their two satellite nodes, so chains of distal relationships share one
+stable `component_id`; the table also reports component size and direct-link
+count.
 
 `--identifier <STR>`
 
@@ -160,7 +186,26 @@ Name of identifier. Used when no matches to a k-mer db are found, or if `--class
 
 `-p / --plot <bool>`
 
-Create a self-identity plot of each input sequence, in `--band` length segments. **Default: None.**
+Save a low-resolution PNG heatmap for every `--band` length matrix. Heatmaps are
+collected under `<output directory>/matrix_plots` and are not displayed
+interactively. Plotting alone does not search for distal links and does not add
+red overlays. **Default: disabled.**
+
+`--distal`
+
+Detect distal-satellite links independently of whether plots are requested.
+Detected off-diagonal blocks are written to
+`<sequence>_distal_links.bedpe`, and used to link satellites in the DSU. A
+compact cross-band matrix and its genomic coordinates are saved to
+`<sequence>_distal_neighborhood.npz`; two neighboring windows on either side of
+each candidate are retained. An unmatched distal axis must pass NTR Prism and
+boundary refinement before it is added to BED/CSV or linked in the DSU.
+Neighboring bands are bridged with bounded candidate-to-all comparisons in both
+directions plus a 50-window seam scan. With both `--distal --plot`, links are
+outlined in red. When the bridge finds evidence, a sparse
+two-band heatmap is saved under `matrix_pairs/`; adjacent pairs are then skipped
+by the final global comparison to avoid duplicate work.
+**Default: disabled.**
 
 `--verbose <bool>`
 
@@ -298,7 +343,41 @@ Creating a *k*-mer db for HG002 using the provided config file takes around 3 mi
 
 ### NTRPrism
 
-Feature coming soon!
+NTRPrism reports the most common distances between consecutive occurrences of
+the same forward k-mer in one FASTA region. Nearby spacing values are combined
+before ranking and plotting, so values such as 170 and 171 bp contribute to the
+same peak by default.
+
+```bash
+anianns ntrprism \
+  -f assembly.fa.gz \
+  -s chr1_MATERNAL \
+  -r 120000000 121000000 \
+  -k 6
+```
+
+The region uses 0-based, half-open coordinates. By default, the command prints
+the ten strongest merged spacing peaks, each peak's count as a percentage of
+the requested interval, and a horizontal ASCII histogram. It does not create
+files unless `--save` is supplied:
+
+```bash
+anianns ntrprism \
+  -f assembly.fa.gz \
+  -s chr1_MATERNAL \
+  -r 120000000 121000000 \
+  -k 11 \
+  --save \
+  -d chr1_ntrprism
+```
+
+With `--save`, AniAnn's also writes a top-ten text report and a PNG histogram.
+The `-k / --kmer` option controls the k-mer length and defaults to 21, matching
+the annotation pipeline. The
+default nearby-value merge distance is 1 bp; use `--merge-distance` to change
+it. Use `--quiet --save` for files without the terminal report. Missing or
+unreadable FASTA files, unknown sequence IDs, invalid ranges, and regions
+shorter than the selected k-mer size produce an error and a nonzero exit status.
 
 ## Questions
 

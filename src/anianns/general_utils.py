@@ -369,6 +369,9 @@ def plot_matrix(
     save_path=None,
     offset=1.0,
     highlight_ranges=None,  # list of (xmin, xmax, ymin, ymax)
+    vmin=86,
+    vmax=100,
+    aspect="auto",
 ):
     import numpy as np
     import matplotlib.pyplot as plt
@@ -381,20 +384,37 @@ def plot_matrix(
 
     fig, ax = plt.subplots(figsize=figsize, dpi=dpi)
 
-    im = ax.imshow(matrix, cmap=cmap, aspect="auto", vmin=86, interpolation="nearest")
+    im = ax.imshow(
+        matrix,
+        cmap=cmap,
+        aspect=aspect,
+        vmin=vmin,
+        vmax=vmax,
+        interpolation="nearest",
+    )
+    if aspect == "equal":
+        ax.set_box_aspect(1)
 
     ax.set_title(title)
     ax.set_xlabel("Columns")
     ax.set_ylabel("Rows")
 
     # --- scale tick labels only ---
-    xticks = ax.get_xticks()
-    yticks = ax.get_yticks()
+    if aspect == "equal":
+        xticks = np.linspace(0, max(0, matrix.shape[1] - 1), 5)
+        yticks = np.linspace(0, max(0, matrix.shape[0] - 1), 5)
+    else:
+        xticks = ax.get_xticks()
+        yticks = ax.get_yticks()
 
     ax.set_xticks(xticks)
     ax.set_yticks(yticks)
-    ax.set_xticklabels([f"{x * offset:.2f}" for x in xticks])
-    ax.set_yticklabels([f"{y * offset:.2f}" for y in yticks])
+    if aspect == "equal":
+        ax.set_xticklabels([f"{x * offset:,.0f}" for x in xticks])
+        ax.set_yticklabels([f"{y * offset:,.0f}" for y in yticks])
+    else:
+        ax.set_xticklabels([f"{x * offset:.2f}" for x in xticks])
+        ax.set_yticklabels([f"{y * offset:.2f}" for y in yticks])
 
     # --- multiple highlight regions ---
     if highlight_ranges is not None:
@@ -468,9 +488,11 @@ def plot_matrix(
 
     plt.tight_layout()
     if save_path:
-        plt.savefig(save_path, dpi=dpi, bbox_inches="tight")
-
-    plt.show()
+        save_kwargs = {} if aspect == "equal" else {"bbox_inches": "tight"}
+        fig.savefig(save_path, dpi=dpi, **save_kwargs)
+        plt.close(fig)
+    else:
+        plt.show()
 
 
 def read_bed_files(files: Union[str, List[str]]) -> List[pl.DataFrame]:

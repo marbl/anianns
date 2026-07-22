@@ -1,4 +1,5 @@
 import polars as pl
+import numpy as np
 
 from anianns import refine_boundaries as refine
 
@@ -91,14 +92,9 @@ def test_detect_precise_boundaries_accepts_zero_as_valid_left_boundary(monkeypat
 
 
 def test_right_boundary_extends_search_instead_of_returning_none(monkeypatch):
-    extracted = iter(["BORDER1", "BORDER2"])
-    monkeypatch.setattr(refine, "extract_region", lambda **kwargs: next(extracted))
+    border_hashes = iter([np.array([1]), np.array([2])])
     monkeypatch.setattr(
-        refine,
-        "generate_kmers_from_fasta",
-        lambda sequence, k, quiet: iter(
-            [9] if sequence == "ARRAY" else ([1] if sequence == "BORDER1" else [2])
-        ),
+        refine, "region_canonical_hashes", lambda *args, **kwargs: next(border_hashes)
     )
     targets = iter([2, 1])
     monkeypatch.setattr(
@@ -124,6 +120,7 @@ def test_right_boundary_extends_search_instead_of_returning_none(monkeypatch):
         interval=50,
         boundary_chunk_size=100,
         boundary=2000,
+        array_kmer_set={9},
     )
 
     assert result is not None
@@ -131,14 +128,9 @@ def test_right_boundary_extends_search_instead_of_returning_none(monkeypatch):
 
 
 def test_left_boundary_extension_searches_updated_kmers(monkeypatch):
-    extracted = iter(["BORDER1", "BORDER2"])
-    monkeypatch.setattr(refine, "extract_region", lambda **kwargs: next(extracted))
+    border_hashes = iter([np.array([1]), np.array([2])])
     monkeypatch.setattr(
-        refine,
-        "generate_kmers_from_fasta",
-        lambda sequence, k, quiet: iter(
-            [9] if sequence == "ARRAY" else ([1] if sequence == "BORDER1" else [2])
-        ),
+        refine, "region_canonical_hashes", lambda *args, **kwargs: next(border_hashes)
     )
     targets = iter([5, 1])
     monkeypatch.setattr(
@@ -165,6 +157,7 @@ def test_left_boundary_extension_searches_updated_kmers(monkeypatch):
         verbosity=False,
         prev_border_coordinate=0,
         boundary=0,
+        array_kmer_set={9},
     )
 
     assert result is not None
@@ -262,6 +255,64 @@ def test_report_borders_merges_candidates_that_share_the_same_band_edge(monkeypa
     assert calls == [(1_900_001, 2_100_001)]
 
 
+def test_report_borders_uses_each_candidates_selected_window(monkeypatch):
+    calls = []
+
+    def fake_detect(**kwargs):
+        calls.append((kwargs["coordinates"], kwargs["window"]))
+        return (*kwargs["coordinates"], None, PRISM_RESULT)
+
+    monkeypatch.setattr(refine, "detect_precise_boundaries", fake_detect)
+    df = pl.DataFrame({"start": [100, 10_000], "end": [500, 20_000]})
+
+    refine.report_borders(
+        fa="input.fa",
+        seq_id="chr1",
+        seq_len=30_000,
+        band=2.0,
+        offset=0,
+        window=1000,
+        candidate_windows=[1000, 4000],
+        k=21,
+        df=df,
+        classify=False,
+        verbose=False,
+        quiet=True,
+    )
+
+    assert calls == [((101, 501), 1000), ((10_001, 20_001), 4000)]
+
+
+def test_report_borders_uses_finer_window_when_merging_band_pieces(monkeypatch):
+    calls = []
+
+    def fake_detect(**kwargs):
+        calls.append((kwargs["coordinates"], kwargs["window"]))
+        return (*kwargs["coordinates"], None, PRISM_RESULT)
+
+    monkeypatch.setattr(refine, "detect_precise_boundaries", fake_detect)
+    df = pl.DataFrame(
+        {"start": [1_900_000, 2_000_000], "end": [2_000_000, 2_100_000]}
+    )
+
+    refine.report_borders(
+        fa="input.fa",
+        seq_id="chr1",
+        seq_len=3_000_000,
+        band=2.0,
+        offset=0,
+        window=1000,
+        candidate_windows=[4000, 1000],
+        k=21,
+        df=df,
+        classify=False,
+        verbose=False,
+        quiet=True,
+    )
+
+    assert calls == [((1_900_001, 2_100_001), 1000)]
+
+
 def test_report_borders_preserves_intentional_ntr_rejection(monkeypatch):
     monkeypatch.setattr(refine, "detect_precise_boundaries", lambda **kwargs: None)
     df = pl.DataFrame({"start": [100], "end": [500]})
@@ -310,9 +361,9 @@ def test_report_borders_writes_boolean_hor_value(monkeypatch):
 
 def test_ntr_prism_ignores_harmonics_without_a_matching_peak(monkeypatch):
     monkeypatch.setattr(
-        refine, "generate_kmers_from_fasta_forward_only", lambda **kwargs: iter([1, 2])
+        refine, "forward_kmer_hashes", lambda *args, **kwargs: np.array([1, 2])
     )
-    monkeypatch.setattr(refine, "calculate_distances", lambda values: [10])
+    monkeypatch.setattr(refine, "calculate_hash_distances", lambda values: [10])
     monkeypatch.setattr(refine, "top_n_frequent_distances", lambda values, n: [(10, 50)])
     monkeypatch.setattr(refine, "merge_close_values", lambda values, n: [(10, 50)])
     monkeypatch.setattr(
@@ -322,3 +373,118 @@ def test_ntr_prism_ignores_harmonics_without_a_matching_peak(monkeypatch):
     result = refine.ntr_prism("ACTG" * 30, 100, 21)
 
     assert result == (10, True, [3], [])
+
+
+def test_annotation_ntr_prism_uses_k21_by_default(monkeypatch):
+    observed = {}
+
+    def capture_hashes(sequence, kmer):
+        observed["kmer"] = kmer
+        return np.array([1, 2])
+
+    monkeypatch.setattr(refine, "forward_kmer_hashes", capture_hashes)
+    monkeypatch.setattr(refine, "calculate_hash_distances", lambda values: [10])
+    monkeypatch.setattr(refine, "top_n_frequent_distances", lambda values, n: [(10, 50)])
+    monkeypatch.setattr(refine, "merge_close_values", lambda values, n: [(10, 50)])
+    monkeypatch.setattr(
+        refine, "hor_test_local_enrichment", lambda *args, **kwargs: False
+    )
+
+    refine.ntr_prism("ACTG" * 30, 100)
+
+    assert observed["kmer"] == 21
+
+
+def test_ntr_prism_uses_dominant_peak_when_shortest_is_not_its_harmonic(
+    monkeypatch,
+):
+    """A frequent 2241-bp repeat must not be mislabeled by a stray 2-bp gap."""
+    monkeypatch.setattr(
+        refine, "forward_kmer_hashes", lambda *args, **kwargs: np.array([1, 2])
+    )
+    monkeypatch.setattr(refine, "calculate_hash_distances", lambda values: [2, 2241])
+    monkeypatch.setattr(
+        refine,
+        "top_n_frequent_distances",
+        lambda values, n: [(2241, 38_564), (2231, 15_717), (2220, 4_387), (2, 3_373)],
+    )
+    monkeypatch.setattr(refine, "merge_close_values", lambda values, n: values)
+    monkeypatch.setattr(
+        refine, "hor_test_local_enrichment", lambda *args, **kwargs: False
+    )
+
+    result = refine.ntr_prism("ACTG" * 60_000, 240_000, 21)
+
+    assert result == (2241, False, None, [])
+
+
+def test_ntr_prism_keeps_shortest_peak_when_dominant_peak_is_its_harmonic(
+    monkeypatch,
+):
+    monkeypatch.setattr(
+        refine, "forward_kmer_hashes", lambda *args, **kwargs: np.array([1, 2])
+    )
+    monkeypatch.setattr(refine, "calculate_hash_distances", lambda values: [171, 342])
+    monkeypatch.setattr(
+        refine,
+        "top_n_frequent_distances",
+        lambda values, n: [(342, 20_000), (171, 5_000)],
+    )
+    monkeypatch.setattr(refine, "merge_close_values", lambda values, n: values)
+    monkeypatch.setattr(
+        refine, "hor_test_local_enrichment", lambda *args, **kwargs: False
+    )
+
+    result = refine.ntr_prism("ACTG" * 10_000, 40_000, 21)
+
+    assert result == (171, False, None, [])
+
+
+def test_region_hashes_slice_existing_sequence_cache(monkeypatch):
+    sequence_hashes = np.arange(100, dtype=np.int32)
+    monkeypatch.setattr(
+        refine,
+        "extract_region",
+        lambda **kwargs: (_ for _ in ()).throw(AssertionError("FASTA was fetched")),
+    )
+
+    result = refine.region_canonical_hashes(
+        "input.fa", "chr1", 10, 20, 4, sequence_hashes
+    )
+
+    assert np.array_equal(result, sequence_hashes[10:17])
+
+
+def test_precise_boundary_reuses_one_core_kmer_set(monkeypatch):
+    monkeypatch.setattr(refine, "extract_region", lambda **kwargs: "ACTG" * 100)
+    monkeypatch.setattr(refine, "ntr_prism", lambda *args, **kwargs: PRISM_RESULT)
+    monkeypatch.setattr(
+        refine, "canonical_kmer_hashes", lambda *args, **kwargs: np.array([4, 8, 4])
+    )
+    seen = []
+
+    def fake_left(**kwargs):
+        seen.append(kwargs["array_kmer_set"])
+        return 100
+
+    def fake_right(**kwargs):
+        seen.append(kwargs["array_kmer_set"])
+        return 500
+
+    monkeypatch.setattr(refine, "detect_left_boundary", fake_left)
+    monkeypatch.setattr(refine, "detect_right_boundary", fake_right)
+
+    refine.detect_precise_boundaries(
+        fasta_file="input.fa",
+        seq_id="chr1",
+        seq_len=1000,
+        window=20,
+        k=4,
+        coordinates=(100, 500),
+        verbose=False,
+        classify=False,
+        previous_coordinates=(0, 1),
+    )
+
+    assert seen[0] is seen[1]
+    assert seen[0] == {4, 8}
