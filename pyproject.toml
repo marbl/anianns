@@ -17,6 +17,7 @@ classifiers = [
     "License :: OSI Approved :: MIT License"
 ]
 dependencies = [
+    "alive-progress>=3.3,<4",
     "pyGenomeTracks",
     "pysam",
     "setproctitle",

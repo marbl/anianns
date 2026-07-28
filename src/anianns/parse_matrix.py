@@ -7,6 +7,7 @@ import matplotlib.pyplot as plt
 
 from anianns.ani_matrix import (
     diagonal_span_bounds,
+    periodic_lag_matches,
     intersection_matrix_cross_groups_thresholded,
     intersection_matrix_rectangular_thresholded,
     intersection_matrix_thresholded,
@@ -50,6 +51,19 @@ class AdjacentBandBridge:
     cross_matrix: np.ndarray
 
 
+@dataclass(frozen=True)
+class PeriodicLagCandidate:
+    """A diagonal-stripe candidate supported by a harmonic lag family."""
+
+    start: int
+    end: int
+    count: int
+    period_bp: int
+    harmonic_lags: tuple
+    coverage: float
+    contrast: float
+
+
 def _block_statistics(binary, row_indices, column_indices):
     if len(row_indices) == 0 or len(column_indices) == 0:
         return 0.0, 0.0, 0.0, 0
@@ -69,6 +83,30 @@ def _block_statistics(binary, row_indices, column_indices):
     row_coverage = supported_row_count / len(row_indices)
     column_coverage = np.count_nonzero(supported_columns) / len(column_indices)
     return density, row_coverage, column_coverage, hit_count
+
+
+def sobel_edge_response(matrix):
+    """Return the normalized two-dimensional Sobel magnitude for plotting."""
+    image = np.asarray(matrix, dtype=np.float32)
+    if image.ndim != 2:
+        raise ValueError("Sobel input must be a two-dimensional matrix")
+    if image.size == 0:
+        return np.zeros(image.shape, dtype=np.float32)
+
+    gradient_x = ndimage.sobel(image, axis=1, mode="nearest")
+    gradient_y = ndimage.sobel(image, axis=0, mode="nearest")
+    magnitude = np.hypot(gradient_x, gradient_y)
+    maximum = float(np.max(magnitude))
+    if maximum <= 0:
+        return np.zeros(image.shape, dtype=np.float32)
+    return magnitude / maximum
+
+
+def sobel_edge_mask(matrix, threshold=0.35):
+    """Return a thresholded Sobel mask; retained for callers needing a mask."""
+    if not 0 <= threshold <= 1:
+        raise ValueError("Sobel threshold must be between zero and one")
+    return sobel_edge_response(matrix) >= threshold
 
 
 def _range_window_indices(genomic_starts, interval, window):
@@ -997,6 +1035,176 @@ def get_diagonal_span_from_sets(
         ((coordinate, count) for coordinate, count in tuple_counts.items() if count >= 3),
         key=lambda item: item[0][0],
     )
+
+
+def _fill_short_false_runs(values, maximum_gap):
+    filled = np.asarray(values, dtype=np.bool_).copy()
+    true_indices = np.flatnonzero(filled)
+    for left, right in zip(true_indices[:-1], true_indices[1:]):
+        if right - left - 1 <= maximum_gap:
+            filled[left : right + 1] = True
+    return filled
+
+
+def _true_runs(values):
+    padded = np.pad(np.asarray(values, dtype=np.int8), (1, 1))
+    changes = np.diff(padded)
+    return zip(np.flatnonzero(changes == 1), np.flatnonzero(changes == -1))
+
+
+def detect_periodic_lag_candidates_from_matches(
+    matches,
+    window,
+    *,
+    min_lag=3,
+    minimum_harmonics=3,
+    minimum_harmonic_completeness=0.60,
+    minimum_peak_density=0.08,
+    minimum_peak_gain=0.12,
+    minimum_contrast=2.5,
+    minimum_coverage=0.60,
+    maximum_gap=2,
+):
+    """Detect localized harmonic diagonal stripes from bounded lag matches."""
+    lag_matches = np.asarray(matches, dtype=np.bool_)
+    if lag_matches.ndim != 2:
+        raise ValueError("periodic lag matches must be two-dimensional")
+    max_lag = lag_matches.shape[0] - 1
+    window_count = lag_matches.shape[1]
+    if max_lag < min_lag * minimum_harmonics or window_count == 0:
+        return []
+
+    densities = np.zeros(max_lag + 1, dtype=np.float64)
+    for lag in range(1, max_lag + 1):
+        denominator = window_count - lag
+        if denominator > 0:
+            densities[lag] = np.count_nonzero(
+                lag_matches[lag, :denominator]
+            ) / denominator
+    baseline = float(np.median(densities[min_lag:]))
+    peak_threshold = max(
+        minimum_peak_density,
+        baseline + minimum_peak_gain,
+        baseline * minimum_contrast,
+    )
+
+    families = []
+    for base_lag in range(min_lag, (max_lag // minimum_harmonics) + 1):
+        if densities[base_lag] < peak_threshold:
+            continue
+        family = []
+        for multiplier in range(1, (max_lag // base_lag) + 1):
+            target = base_lag * multiplier
+            tolerance = max(1, int(round(target * 0.03)))
+            lower = max(min_lag, target - tolerance)
+            upper = min(max_lag, target + tolerance)
+            lag = max(range(lower, upper + 1), key=lambda value: densities[value])
+            if densities[lag] >= peak_threshold and lag not in family:
+                family.append(lag)
+        expected_harmonics = max_lag // base_lag
+        if (
+            len(family) < minimum_harmonics
+            or len(family) / expected_harmonics < minimum_harmonic_completeness
+        ):
+            continue
+
+        excluded = np.zeros(max_lag + 1, dtype=np.bool_)
+        for lag in family:
+            excluded[max(1, lag - 1) : min(max_lag + 1, lag + 2)] = True
+        background_values = densities[min_lag:][~excluded[min_lag:]]
+        local_background = (
+            float(np.median(background_values)) if background_values.size else baseline
+        )
+        family_strength = float(np.mean(densities[family]))
+        contrast = (family_strength + 1e-9) / (local_background + 1e-9)
+        if (
+            family_strength - local_background < minimum_peak_gain
+            or contrast < minimum_contrast
+        ):
+            continue
+        families.append((family_strength * len(family), base_lag, tuple(family), contrast))
+
+    if not families:
+        return []
+    _score, base_lag, harmonic_lags, contrast = max(
+        families,
+        key=lambda item: (item[0], -item[1]),
+    )
+
+    row_support = np.zeros(window_count, dtype=np.int16)
+    for lag in harmonic_lags:
+        hit_rows = np.flatnonzero(lag_matches[lag, : window_count - lag])
+        row_support[hit_rows] += 1
+        row_support[hit_rows + lag] += 1
+    supported = row_support >= min(2, len(harmonic_lags))
+    closed_support = _fill_short_false_runs(supported, maximum_gap)
+    minimum_run = max(10, minimum_harmonics * base_lag)
+
+    candidates = []
+    for start_index, end_index in _true_runs(closed_support):
+        run_length = end_index - start_index
+        if run_length < minimum_run:
+            continue
+        support_count = int(np.count_nonzero(supported[start_index:end_index]))
+        coverage = support_count / run_length
+        if coverage < minimum_coverage:
+            continue
+        candidates.append(
+            PeriodicLagCandidate(
+                start=start_index * window,
+                end=end_index * window,
+                count=support_count,
+                period_bp=base_lag * window,
+                harmonic_lags=harmonic_lags,
+                coverage=coverage,
+                contrast=contrast,
+            )
+        )
+    return candidates
+
+
+def detect_periodic_lag_candidates_from_sets(
+    overlapping,
+    non_overlapping,
+    window,
+    k,
+    identity,
+    *,
+    max_lag_windows=256,
+):
+    """Find periodic diagonal-stripe candidates without a full matrix."""
+    window_count = len(overlapping)
+    if window_count < 10:
+        return []
+    max_lag = min(max_lag_windows, window_count - 1)
+    matches = periodic_lag_matches(
+        overlapping,
+        non_overlapping,
+        k,
+        identity,
+        max_lag,
+    )
+    return detect_periodic_lag_candidates_from_matches(matches, window)
+
+
+def detect_periodic_lag_candidates_from_matrix(
+    matrix,
+    window,
+    *,
+    max_lag_windows=256,
+):
+    """Reuse a threshold matrix for periodic diagonal-stripe detection."""
+    binary = np.asarray(matrix, dtype=np.bool_)
+    if binary.ndim != 2 or binary.shape[0] != binary.shape[1]:
+        raise ValueError("periodic lag detection requires a square matrix")
+    window_count = binary.shape[0]
+    if window_count < 10:
+        return []
+    max_lag = min(max_lag_windows, window_count - 1)
+    matches = np.zeros((max_lag + 1, window_count), dtype=np.bool_)
+    for lag in range(1, max_lag + 1):
+        matches[lag, : window_count - lag] = np.diagonal(binary, offset=lag)
+    return detect_periodic_lag_candidates_from_matches(matches, window)
 
 
 def build_candidate_neighborhood_matrix(

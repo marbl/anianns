@@ -140,6 +140,32 @@ def analyze_kmer_spacings(
     return merge_spacing_counts(raw_counts, merge_distance), int(len(distances))
 
 
+def supports_periodic_lag(
+    sequence: str,
+    period_bp: int,
+    *,
+    kmer: int = 21,
+    minimum_interval_fraction: float = 0.01,
+    harmonic_tolerance: float = 0.08,
+    max_peaks: int = 100,
+) -> bool:
+    """Confirm that sequence spacing peaks explain a matrix-derived period."""
+    if period_bp <= 0 or len(sequence) < kmer:
+        return False
+    peaks, _total_distances = analyze_kmer_spacings(sequence, kmer=kmer)
+    for peak in peaks[:max_peaks]:
+        if peak.count / len(sequence) < minimum_interval_fraction:
+            continue
+        smaller = min(period_bp, peak.spacing)
+        larger = max(period_bp, peak.spacing)
+        if smaller <= 0:
+            continue
+        harmonic = max(1, round(larger / smaller))
+        if abs(larger - (harmonic * smaller)) <= harmonic_tolerance * larger:
+            return True
+    return False
+
+
 def format_spacing_table(
     peaks: list[SpacingPeak], interval_length: int, top_n: int = 10
 ) -> str:

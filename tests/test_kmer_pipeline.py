@@ -43,6 +43,21 @@ def test_canonical_kmer_hashes_match_existing_generator_exactly():
         assert np.array_equal(canonical_kmer_hashes(sequence, 4), expected)
 
 
+def test_canonical_kmer_hashes_match_reference_on_randomized_sequences():
+    rng = np.random.default_rng(2026)
+    alphabet = np.array(list("ACGTrymkswhbvdn-"))
+    for length in (1, 4, 21, 64, 257):
+        sequence = "".join(rng.choice(alphabet, size=length).tolist())
+        for kmer in (1, 4, 21):
+            expected = np.array(
+                list(generate_kmers_from_fasta(sequence, kmer, True)),
+                dtype=np.int32,
+            )
+            assert np.array_equal(
+                canonical_kmer_hashes(sequence, kmer), expected
+            )
+
+
 def test_batch_forward_hashes_match_existing_generator_exactly():
     for sequence in ("ACTGactgACTG", "AAARYMKSWNtttACTG", "ACT"):
         expected = np.array(
@@ -120,6 +135,22 @@ def _assert_pipeline_matches_full_sequence(fasta_path, sequence, use_process):
 def test_synchronous_band_pipeline_matches_full_sequence_hashes(tmp_path):
     fasta_path, sequence = _indexed_fasta(tmp_path)
     _assert_pipeline_matches_full_sequence(fasta_path, sequence, use_process=False)
+
+
+def test_hash_worker_applies_its_thread_limit(tmp_path, monkeypatch):
+    fasta_path, sequence = _indexed_fasta(tmp_path)
+    plan = SequenceBandPlan(len(sequence), 4, 10, (6,))
+    request = next(plan.requests())
+    configured = []
+    monkeypatch.setattr(kmer_pipeline, "set_num_threads", configured.append)
+
+    band = kmer_pipeline._hash_fasta_band(
+        str(fasta_path), "chr1", len(sequence), 4, request, 1
+    )
+
+    assert configured == [1]
+    assert band.index == request.index
+    assert len(band.hashes) == request.hash_count
 
 
 def test_process_band_pipeline_matches_full_sequence_hashes(tmp_path):

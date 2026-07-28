@@ -8,6 +8,7 @@ from anianns.general_utils import (
     add_prefix_to_tuples,
     calculate_distances,
     check_bed_vs_indexed_fasta,
+    clean_genomic_ticks,
     convert_dataframe_format,
     define_bounds,
     extract_histograms_by_name,
@@ -21,6 +22,10 @@ from anianns.general_utils import (
     validate_json,
     write_summary_file,
 )
+
+
+def test_clean_genomic_ticks_uses_band_coordinates_and_readable_steps():
+    assert clean_genomic_ticks(2.0, 4.0).tolist() == [2.0, 2.5, 3.0, 3.5, 4.0]
 
 
 @pytest.fixture
@@ -193,6 +198,18 @@ def test_plot_matrix_validates_inputs(monkeypatch, tmp_path):
     with pytest.raises(ValueError):
         plot_matrix(pl.Series("x", [1, 2]).to_numpy())
 
+    with pytest.raises(ValueError, match="overlay must match"):
+        plot_matrix(
+            pl.DataFrame([[1, 2], [3, 4]]).to_numpy(),
+            edge_overlay=pl.DataFrame([[True]]).to_numpy(),
+        )
+
+    with pytest.raises(ValueError, match="requires a Sobel"):
+        plot_matrix(
+            pl.DataFrame([[1, 2], [3, 4]]).to_numpy(),
+            edge_only=True,
+        )
+
     plot_matrix(pl.DataFrame([[1, 2], [3, 4]]).to_numpy(), show_colorbar=False)
 
     save_path = tmp_path / "heatmap.png"
@@ -202,6 +219,10 @@ def test_plot_matrix_validates_inputs(monkeypatch, tmp_path):
     )
     plot_matrix(
         pl.DataFrame([[86, 90], [95, 100]]).to_numpy(),
+        edge_overlay=pl.DataFrame([[True, False], [False, True]]).to_numpy(),
+        edge_only=True,
+        diagonal_ranges=[(0, 1)],
+        highlight_ranges=[(1, 2, 0, 1)],
         show_colorbar=False,
         dpi=36,
         figsize=(2, 2),

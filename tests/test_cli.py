@@ -38,6 +38,7 @@ def test_mask_type_and_parser_defaults():
     assert args.window == 2000
     assert args.plot is False
     assert args.distal is False
+    assert args.threads == cli.MAX_THREADS
     assert not hasattr(args, "distal_halo")
     assert args.output_format == "bed"
 
@@ -46,6 +47,15 @@ def test_mask_type_and_parser_defaults():
     )
     assert dense_args.sketch == 2
     assert args.band == 2.0
+
+    requested_threads = min(2, cli.MAX_THREADS)
+    threaded_args = parser.parse_args(
+        ["annotate", "-f", "input.fa", "--threads", str(requested_threads)]
+    )
+    assert threaded_args.threads == requested_threads
+
+    with pytest.raises(SystemExit):
+        parser.parse_args(["annotate", "-f", "input.fa", "--threads", "0"])
 
     multi_args = parser.parse_args(
         ["annotate", "-f", "input.fa", "-w", "5000"]
@@ -69,6 +79,25 @@ def test_format_matrix_runtime_compares_with_previous_matrix():
     assert cli.format_matrix_runtime(3, 3, 1.0, 1.25) == (
         "Matrix 3/3 completed in 1.000 s — 0.250 s faster "
         "(-20.0%) than matrix 2."
+    )
+
+
+def test_annotation_thread_allocation_preserves_total_budget():
+    assert cli.annotation_thread_allocation(8, cache_hit=False, band_count=3) == (
+        7,
+        True,
+    )
+    assert cli.annotation_thread_allocation(1, cache_hit=False, band_count=3) == (
+        1,
+        False,
+    )
+    assert cli.annotation_thread_allocation(8, cache_hit=True, band_count=3) == (
+        8,
+        False,
+    )
+    assert cli.annotation_thread_allocation(8, cache_hit=False, band_count=1) == (
+        8,
+        False,
     )
 
 
@@ -306,7 +335,7 @@ def test_main_annotate_writes_bed_and_summary(
     monkeypatch.setattr(
         cli,
         "iter_hashed_fasta_bands",
-        lambda fasta, seq_id, plan, cache_dir: [
+        lambda fasta, seq_id, plan, **kwargs: [
             HashedBand(
                 index=request.index,
                 start=request.start,
@@ -334,13 +363,32 @@ def test_main_annotate_writes_bed_and_summary(
             for window in window_configs
         },
     )
-    calls = {"dense": 0, "plot": 0, "highlights": []}
+    calls = {
+        "dense": 0,
+        "plot": 0,
+        "highlights": [],
+        "diagonal": [],
+        "edges": [],
+        "cmaps": [],
+        "colorbars": [],
+        "dpis": [],
+        "white_below": [],
+    }
 
     def fake_dense(*args):
         calls["dense"] += 1
         return __import__("numpy").array([[100.0]])
 
     monkeypatch.setattr(cli, "intersection_matrix_thresholded", fake_dense)
+    monkeypatch.setattr(cli, "intersection_matrix", lambda *args: fake_dense())
+    monkeypatch.setattr(
+        cli,
+        "intersection_matrix_with_threshold",
+        lambda *args: (
+            fake_dense(),
+            __import__("numpy").array([[True]], dtype=bool),
+        ),
+    )
     monkeypatch.setattr(
         cli,
         "get_diagonal_span_from_sets",
@@ -349,6 +397,12 @@ def test_main_annotate_writes_bed_and_summary(
     def fake_plot(matrix, **kwargs):
         calls["plot"] += 1
         calls["highlights"].append(kwargs.get("highlight_ranges"))
+        calls["diagonal"].append(kwargs.get("diagonal_ranges"))
+        calls["edges"].append(kwargs.get("edge_overlay"))
+        calls["cmaps"].append(kwargs.get("cmap"))
+        calls["colorbars"].append(kwargs.get("show_colorbar"))
+        calls["dpis"].append(kwargs.get("dpi"))
+        calls["white_below"].append(kwargs.get("white_below"))
         Path(kwargs["save_path"]).write_bytes(b"png")
 
     monkeypatch.setattr(cli, "plot_matrix", fake_plot)
@@ -392,11 +446,27 @@ def test_main_annotate_writes_bed_and_summary(
     assert "Total satellites: 1" in dsu_text
     assert "chr1:2-18 name=HSAT" in dsu_text
     assert calls["dense"] == (2 if plot or distal else 0)
-    assert calls["plot"] == (2 if plot else 0)
+    assert calls["plot"] == (4 if plot else 0)
     if plot and not distal:
-        assert calls["highlights"] == [[], []]
+        assert calls["highlights"] == [[], None, [], None]
+    if plot:
+        assert len(calls["edges"]) == 4
+        assert all(calls["edges"][index] is not None for index in (0, 2))
+        assert all(calls["edges"][index] is None for index in (1, 3))
+        assert all(calls["diagonal"][index] for index in (0, 2))
+        assert all(calls["diagonal"][index] is None for index in (1, 3))
+        assert [calls["cmaps"][index] for index in (1, 3)] == [
+            "spectral_11_r",
+            "spectral_11_r",
+        ]
+        assert [calls["colorbars"][index] for index in (1, 3)] == [True, True]
+        assert [calls["white_below"][index] for index in (1, 3)] == [86, 86]
+        assert all(calls["dpis"][raw] > calls["dpis"][raw - 1] for raw in (1, 3))
     heatmaps = sorted((tmp_path / "matrix_plots").glob("*.png"))
-    assert len(heatmaps) == (2 if plot else 0)
+    assert len(heatmaps) == (4 if plot else 0)
+    assert len(list((tmp_path / "matrix_plots").glob("*_identity.png"))) == (
+        2 if plot else 0
+    )
     assert not list(tmp_path.glob("*_matrix.npy"))
     assert not list(tmp_path.glob("*_distal_*_matrix.npy"))
     assert (tmp_path / "chr1_distal_neighborhood.npz").exists() is distal
@@ -425,6 +495,17 @@ def test_binary_plot_downsampling_uses_max_pooling():
     assert pooled.shape == (3, 3)
     assert pooled[0, 2]
     assert pooled.sum() == 1
+
+
+def test_numeric_plot_downsampling_preserves_peak_identity():
+    matrix = __import__("numpy").arange(36, dtype=float).reshape(6, 6)
+
+    pooled, scale = cli.downsample_numeric_matrix(matrix, max_pixels=3)
+
+    assert scale == 2
+    assert pooled.shape == (3, 3)
+    assert pooled[0, 0] == 7
+    assert pooled[-1, -1] == 35
 
 
 def test_seam_candidates_merge_fragments_across_band_boundary():

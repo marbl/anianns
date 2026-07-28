@@ -19,6 +19,7 @@ class WindowCandidate:
     end: int
     count: int
     window: int
+    source: str = "diagonal"
 
     @property
     def length(self) -> int:
@@ -82,7 +83,10 @@ def candidates_compete(first: WindowCandidate, second: WindowCandidate) -> bool:
     # Preserve the historical behavior within one resolution. Arbitration is
     # only intended to reconcile alternate calls introduced by multi-window
     # mode; same-window band pieces are handled by boundary refinement.
-    if first.window == second.window:
+    if (
+        first.window == second.window
+        and "periodic_diagonal" not in (first.source, second.source)
+    ):
         return False
     overlap = _overlap(first, second)
     if overlap <= 0 or first.length <= 0 or second.length <= 0:
@@ -98,7 +102,13 @@ def select_multi_window_candidates(
 ) -> list[WindowCandidate]:
     """Filter candidates and retain the best nonredundant window per locus."""
     unique = {
-        (candidate.start, candidate.end, candidate.count, candidate.window): candidate
+        (
+            candidate.start,
+            candidate.end,
+            candidate.count,
+            candidate.window,
+            candidate.source,
+        ): candidate
         for candidate in candidates
         if candidate_passes_support(candidate)
     }
@@ -137,6 +147,7 @@ def write_window_selection(
                 "support_bp",
                 "support_density",
                 "selection_score",
+                "source",
             )
         )
         for candidate in candidates:
@@ -150,6 +161,7 @@ def write_window_selection(
                     candidate.support_bp,
                     f"{candidate.density:.6f}",
                     f"{candidate.selection_score:.3f}",
+                    candidate.source,
                 )
             )
     return output_path

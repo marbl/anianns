@@ -9,7 +9,6 @@ from anianns.kmer_utils import (
     generate_kmers_from_fasta,
     generate_kmers_from_fasta_forward_only,
     generate_kmers_from_fasta_reverse_only,
-    print_progress_bar,
     read_sequence_kmers_from_file,
     remove_ambiguous_bases,
 )
@@ -102,11 +101,6 @@ def test_forward_and_reverse_only_kmer_generators_hash_expected_strings():
     ]
 
 
-def test_print_progress_bar_writes_terminal_output(capsys):
-    print_progress_bar(5, 5, prefix="Progress:", suffix="Done", length=10)
-    assert "100.0% Done" in capsys.readouterr().out
-
-
 def test_kmer_generators_emit_progress_when_not_quiet(capsys):
     seq = "A" * 80
     forward = list(generate_kmers_from_fasta_forward_only(seq, 4, False))
@@ -114,7 +108,10 @@ def test_kmer_generators_emit_progress_when_not_quiet(capsys):
     canonical = list(generate_kmers_from_fasta(seq, 4, False))
 
     assert len(forward) == len(reverse) == len(canonical) == 77
-    assert "Completed" in capsys.readouterr().out
+    output = capsys.readouterr().out
+    assert "Hashing forward k-mers" in output
+    assert "Hashing reverse k-mers" in output
+    assert "Hashing k-mers" in output
 
 
 def test_kmer_generators_handle_short_sequences_with_progress_enabled(capsys):
@@ -125,7 +122,7 @@ def test_kmer_generators_handle_short_sequences_with_progress_enabled(capsys):
     canonical = list(generate_kmers_from_fasta(seq, 4, False))
 
     assert len(forward) == len(reverse) == len(canonical) == 2
-    assert "Completed" in capsys.readouterr().out
+    assert "Hashing k-mers" in capsys.readouterr().out
 
 
 def test_kmer_generators_return_empty_for_sequences_shorter_than_k():

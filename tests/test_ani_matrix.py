@@ -5,8 +5,10 @@ from anianns.ani_matrix import (
     intersection_len,
     intersection_matrix,
     intersection_matrix_inverted,
+    intersection_matrix_rectangular,
     intersection_matrix_rectangular_thresholded,
     intersection_matrix_thresholded,
+    intersection_matrix_with_threshold,
 )
 from anianns.parse_matrix import (
     CandidateNeighborhoodAccumulator,
@@ -15,10 +17,14 @@ from anianns.parse_matrix import (
     detect_distal_links,
     detect_adjacent_band_bridge,
     detect_candidate_to_all_links_from_matrix,
+    detect_periodic_lag_candidates_from_matches,
+    detect_periodic_lag_candidates_from_matrix,
     filter_candidate_distal_links,
     get_diagonal_span,
     get_diagonal_span_from_sets,
     snap_distal_links_to_candidates,
+    sobel_edge_mask,
+    sobel_edge_response,
 )
 
 
@@ -48,6 +54,97 @@ def test_intersection_matrix_is_symmetric_and_handles_empty_windows():
     assert matrix[0, 1] > 0.0
 
 
+def test_rectangular_identity_matrix_returns_exact_scores():
+    left_overlapping = [np.array([1, 2, 3], dtype=np.int32)]
+    left_non_overlapping = [np.array([1, 2], dtype=np.int32)]
+    right_overlapping = [
+        np.array([1, 2], dtype=np.int32),
+        np.array([8, 9], dtype=np.int32),
+    ]
+    right_non_overlapping = [
+        np.array([1, 2, 3], dtype=np.int32),
+        np.array([8, 9], dtype=np.int32),
+    ]
+
+    matrix = intersection_matrix_rectangular.py_func(
+        left_overlapping,
+        left_non_overlapping,
+        right_overlapping,
+        right_non_overlapping,
+        21,
+    )
+
+    assert matrix.shape == (1, 2)
+    assert matrix[0, 0] == 100.0
+    assert matrix[0, 1] == 0.0
+
+
+def test_sobel_edge_mask_outlines_matrix_blocks():
+    matrix = np.zeros((9, 9), dtype=np.bool_)
+    matrix[2:7, 3:6] = True
+
+    edges = sobel_edge_mask(matrix)
+
+    assert edges.dtype == np.bool_
+    assert edges.shape == matrix.shape
+    assert edges[2, 3]
+    assert edges[6, 5]
+    assert not edges[4, 4]
+    assert not np.any(sobel_edge_mask(np.zeros((3, 3), dtype=np.bool_)))
+
+
+def test_sobel_edge_response_preserves_normalized_gradient_strength():
+    matrix = np.zeros((9, 9), dtype=np.bool_)
+    matrix[2:7, 3:6] = True
+
+    response = sobel_edge_response(matrix)
+
+    assert response.dtype == np.float32
+    assert response.shape == matrix.shape
+    assert np.isclose(response.max(), 1.0)
+    assert 0 < response[2, 3] <= 1
+    assert response[4, 4] == 0
+
+
+def test_periodic_lag_detector_recovers_parallel_diagonal_stripes():
+    matches = np.zeros((51, 200), dtype=np.bool_)
+    for lag in (10, 20, 30, 40, 50):
+        matches[lag, 20 : 180 - lag] = True
+
+    [candidate] = detect_periodic_lag_candidates_from_matches(matches, 1000)
+
+    assert candidate.period_bp == 10_000
+    assert candidate.start <= 20_000
+    assert candidate.end >= 180_000
+    assert candidate.coverage >= 0.60
+    assert len(candidate.harmonic_lags) >= 3
+
+
+def test_periodic_lag_detector_rejects_single_stripe_and_dense_background():
+    single = np.zeros((51, 200), dtype=np.bool_)
+    single[10, 20:170] = True
+    assert detect_periodic_lag_candidates_from_matches(single, 1000) == []
+
+    dense = np.zeros((51, 200), dtype=np.bool_)
+    for lag in range(3, 51):
+        dense[lag, 20 : 180 - lag] = True
+    assert detect_periodic_lag_candidates_from_matches(dense, 1000) == []
+
+
+def test_periodic_lag_detector_reuses_dense_matrix_exactly():
+    matches = np.zeros((51, 200), dtype=np.bool_)
+    matrix = np.zeros((200, 200), dtype=np.bool_)
+    for lag in (10, 20, 30, 40, 50):
+        matches[lag, 20 : 180 - lag] = True
+        rows = np.arange(20, 180 - lag)
+        matrix[rows, rows + lag] = True
+        matrix[rows + lag, rows] = True
+
+    assert detect_periodic_lag_candidates_from_matrix(
+        matrix, 1000, max_lag_windows=50
+    ) == detect_periodic_lag_candidates_from_matches(matches, 1000)
+
+
 def test_thresholded_matrix_is_compact_and_matches_score_threshold():
     overlapping = [
         np.array([1, 2, 3, 4], dtype=np.int32),
@@ -66,6 +163,31 @@ def test_thresholded_matrix_is_compact_and_matches_score_threshold():
     assert thresholded.dtype == np.bool_
     assert np.array_equal(thresholded, scores >= 75)
     assert np.array_equal(thresholded, thresholded.T)
+
+
+def test_combined_identity_matrix_preserves_both_existing_results():
+    rng = np.random.default_rng(7)
+    non_overlapping = [
+        np.sort(rng.choice(500, size=size, replace=False)).astype(np.int32)
+        for size in (40, 35, 0, 50, 20)
+    ]
+    overlapping = [
+        np.sort(rng.choice(500, size=size, replace=False)).astype(np.int32)
+        for size in (60, 45, 0, 70, 30)
+    ]
+
+    expected_identity = intersection_matrix.py_func(
+        overlapping, non_overlapping, 21
+    )
+    expected_threshold = intersection_matrix_thresholded.py_func(
+        overlapping, non_overlapping, 21, 86
+    )
+    identity, threshold = intersection_matrix_with_threshold.py_func(
+        overlapping, non_overlapping, 21, 86
+    )
+
+    assert np.array_equal(identity, expected_identity)
+    assert np.array_equal(threshold, expected_threshold)
 
 
 def test_rectangular_matrix_compares_selected_windows_between_bands():
@@ -448,6 +570,22 @@ def test_candidate_to_all_scan_accepts_short_supported_anchor():
     assert len(links) == 1
     assert (links[0].start1, links[0].end1) == (0, 9000)
     assert (links[0].start2, links[0].end2) == (40_000, 64_000)
+
+
+def test_fragmented_edges_do_not_change_distal_prediction():
+    matrix = np.zeros((5, 40), dtype=np.bool_)
+    for column in range(20, 35):
+        row = column % 5
+        matrix[row, column] = True
+        matrix[(row + 1) % 5, column] = True
+
+    assert detect_candidate_to_all_links_from_matrix(
+        matrix,
+        np.arange(5, dtype=np.int64) * 2000,
+        np.arange(40, dtype=np.int64) * 2000,
+        ((0, 9000),),
+        2000,
+    ) == []
 
 
 def test_known_candidate_pair_accepts_one_short_high_confidence_axis():

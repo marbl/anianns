@@ -11,6 +11,7 @@ from anianns.ntrprism import (
     format_ascii_histogram,
     format_spacing_table,
     merge_spacing_counts,
+    supports_periodic_lag,
 )
 
 
@@ -40,6 +41,13 @@ def test_analyze_kmer_spacings_finds_tandem_period():
     assert total == 74
     assert peaks[0].spacing == 4
     assert peaks[0].count == 74
+
+
+def test_periodic_lag_validation_accepts_harmonics_and_rejects_noise():
+    repeated = "ACGTTGCA" * 80
+
+    assert supports_periodic_lag(repeated, 80, kmer=5)
+    assert not supports_periodic_lag("ACGTTGCATCGAGCTAGTCA", 80, kmer=5)
 
 
 def test_analyze_kmer_spacings_defaults_to_k21(monkeypatch):

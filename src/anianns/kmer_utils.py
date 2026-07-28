@@ -1,5 +1,7 @@
 import mmh3
 import pysam
+from alive_progress import alive_it
+import sys
 from typing import Iterable, List, Sequence
 import numpy as np
 from numba import njit, types
@@ -171,29 +173,21 @@ def read_sequence_kmers_from_file(
 
 def generate_kmers_from_fasta(seq: Sequence[str], k: int, quiet: bool) -> Iterable[int]:
     n = len(seq)
-    total_kmers, progress_thresholds = _progress_settings(n, k)
+    total_kmers, _progress_thresholds = _progress_settings(n, k)
     if total_kmers <= 0:
         return
+    indices = range(total_kmers)
     if not quiet:
-        print_progress_bar(
-            0, total_kmers, prefix="Progress:", suffix="Complete", length=40
+        indices = alive_it(
+            indices,
+            title="Hashing k-mers",
+            unit=" k-mer",
+            enrich_print=False,
+            file=sys.stdout,
         )
 
     bases_to_remove = ["R", "Y", "M", "K", "S", "W", "H", "B", "V", "D", "N"]
-    for i in range(total_kmers):
-        if not quiet:
-            if i % progress_thresholds == 0:
-                print_progress_bar(
-                    i, total_kmers, prefix="Progress:", suffix="Complete", length=40
-                )
-            if i == total_kmers - 1:
-                print_progress_bar(
-                    total_kmers,
-                    total_kmers,
-                    prefix="Progress:",
-                    suffix="Completed",
-                    length=40,
-                )
+    for i in indices:
         # Remove case sensitivity
         kmer = seq[i : i + k].upper()
         # Skip kmer if it contains any ambiguous base
@@ -213,28 +207,20 @@ def generate_kmers_from_fasta_forward_only(
     seq: Sequence[str], k: int, quiet: bool
 ) -> Iterable[int]:
     n = len(seq)
-    total_kmers, progress_thresholds = _progress_settings(n, k)
+    total_kmers, _progress_thresholds = _progress_settings(n, k)
     if total_kmers <= 0:
         return
+    indices = range(total_kmers)
     if not quiet:
-        print_progress_bar(
-            0, total_kmers, prefix="Progress:", suffix="Complete", length=40
+        indices = alive_it(
+            indices,
+            title="Hashing forward k-mers",
+            unit=" k-mer",
+            enrich_print=False,
+            file=sys.stdout,
         )
 
-    for i in range(total_kmers):
-        if not quiet:
-            if i % progress_thresholds == 0:
-                print_progress_bar(
-                    i, total_kmers, prefix="Progress:", suffix="Complete", length=40
-                )
-            if i == total_kmers - 1:
-                print_progress_bar(
-                    total_kmers,
-                    total_kmers,
-                    prefix="Progress:",
-                    suffix="Completed",
-                    length=40,
-                )
+    for i in indices:
         # Remove case sensitivity
         kmer = seq[i : i + k].upper()
         fh = mmh3.hash(kmer, seed=42)
@@ -246,49 +232,22 @@ def generate_kmers_from_fasta_reverse_only(
     seq: Sequence[str], k: int, quiet: bool
 ) -> Iterable[int]:
     n = len(seq)
-    total_kmers, progress_thresholds = _progress_settings(n, k)
+    total_kmers, _progress_thresholds = _progress_settings(n, k)
     if total_kmers <= 0:
         return
+    indices = range(total_kmers)
     if not quiet:
-        print_progress_bar(
-            0, total_kmers, prefix="Progress:", suffix="Complete", length=40
+        indices = alive_it(
+            indices,
+            title="Hashing reverse k-mers",
+            unit=" k-mer",
+            enrich_print=False,
+            file=sys.stdout,
         )
 
-    for i in range(total_kmers):
-        if not quiet:
-            if i % progress_thresholds == 0:
-                print_progress_bar(
-                    i, total_kmers, prefix="Progress:", suffix="Complete", length=40
-                )
-            if i == total_kmers - 1:
-                print_progress_bar(
-                    total_kmers,
-                    total_kmers,
-                    prefix="Progress:",
-                    suffix="Completed",
-                    length=40,
-                )
+    for i in indices:
         # Remove case sensitivity
         kmer = seq[i : i + k].upper()
         rc = mmh3.hash(kmer[::-1].translate(tab_b), seed=42)
 
         yield rc
-
-
-def print_progress_bar(
-    iteration,
-    total,
-    prefix="",
-    suffix="",
-    decimals=1,
-    length=100,
-    fill="█",
-    printEnd="\r",
-):
-    percent = f"{100 * (iteration / total):.{decimals}f}"
-    filledLength = int(length * iteration // total)
-    bar = [fill] * filledLength + ["-"] * (length - filledLength)
-    bar_str = "".join(bar)
-    print(f"\r{prefix} |{bar_str}| {percent}% {suffix}", end=printEnd)
-    if iteration == total:
-        print()

@@ -11,8 +11,16 @@ import pysam
 import math
 import time
 import numpy as np
+from alive_progress import alive_bar
+from numba import config as numba_config
+from numba import set_num_threads
 
-from anianns.ani_matrix import intersection_matrix_thresholded
+from anianns.ani_matrix import (
+    intersection_matrix,
+    intersection_matrix_rectangular,
+    intersection_matrix_thresholded,
+    intersection_matrix_with_threshold,
+)
 
 from anianns.build_kmer_db import (
     save_kmer_sets_shared_k,
@@ -36,7 +44,6 @@ from anianns.general_utils import (
 from anianns.kmer_utils import (
     build_kmer_sets,
     build_kmer_sets_multi,
-    print_progress_bar,
 )
 
 from anianns.kmer_pipeline import (
@@ -50,6 +57,7 @@ from anianns.ntrprism import (
     analyze_kmer_spacings,
     format_ascii_histogram,
     format_spacing_table,
+    supports_periodic_lag,
     write_spacing_histogram,
     write_spacing_report,
 )
@@ -74,7 +82,11 @@ from anianns.parse_matrix import (
     get_diagonal_span,
     get_diagonal_span_from_sets,
     merge_shared_boundaries,
+    PeriodicLagCandidate,
+    detect_periodic_lag_candidates_from_matrix,
+    detect_periodic_lag_candidates_from_sets,
     snap_distal_links_to_candidates,
+    sobel_edge_response,
     sobel_with_diagonal_probes,
     sobel_spans,
 )
@@ -87,6 +99,32 @@ from anianns.union_find import (
     sobel_with_diagonal_probes2,
     find_offdiag_rectangles,
 )
+
+
+MAX_THREADS = int(numba_config.NUMBA_NUM_THREADS)
+
+
+def thread_count_type(value):
+    """Parse a positive thread count supported by this Numba runtime."""
+    try:
+        threads = int(value)
+    except (TypeError, ValueError) as error:
+        raise argparse.ArgumentTypeError("thread count must be an integer") from error
+    if threads < 1:
+        raise argparse.ArgumentTypeError("thread count must be at least 1")
+    if threads > MAX_THREADS:
+        raise argparse.ArgumentTypeError(
+            f"thread count cannot exceed the available maximum ({MAX_THREADS})"
+        )
+    return threads
+
+
+def annotation_thread_allocation(threads, *, cache_hit, band_count):
+    """Split the total budget between matrix work and streamed hashing."""
+    use_hash_process = not cache_hit and threads > 1 and band_count > 1
+    matrix_threads = threads - 1 if use_hash_process else threads
+    return matrix_threads, use_hash_process
+
 
 os.environ["KMP_WARNINGS"] = "FALSE"
 
@@ -316,6 +354,41 @@ def scan_additional_window_candidates(
     return candidates, sketch_runtime, scan_runtime
 
 
+def scan_primary_window(
+    overlapping,
+    non_overlapping,
+    window,
+    kmer,
+    identity,
+    *,
+    threshold_matrix=None,
+):
+    """Find primary diagonal and periodic calls, reusing a dense matrix."""
+    if threshold_matrix is None:
+        spans = get_diagonal_span_from_sets(
+            overlapping,
+            non_overlapping,
+            window,
+            kmer,
+            identity,
+            zero_tol=2,
+        )
+        periodic = detect_periodic_lag_candidates_from_sets(
+            overlapping,
+            non_overlapping,
+            window,
+            kmer,
+            identity,
+        )
+    else:
+        spans = get_diagonal_span(threshold_matrix, window, zero_tol=2)
+        periodic = detect_periodic_lag_candidates_from_matrix(
+            threshold_matrix,
+            window,
+        )
+    return spans, periodic
+
+
 def combine_band_candidates(primary_candidates, additional_candidates, prefix):
     """Combine primary and supported multi-window calls in band coordinates."""
     combined = [tuple(candidate) for candidate in primary_candidates]
@@ -333,6 +406,112 @@ def combine_band_candidates(primary_candidates, additional_candidates, prefix):
             combined.append(local)
             seen.add(key)
     return combined
+
+
+def merge_periodic_lag_candidates(candidates, window):
+    """Merge compatible periodic rescues split at matrix-band boundaries."""
+    merged = []
+    for candidate in sorted(candidates, key=lambda item: (item.start, item.end)):
+        if not merged:
+            merged.append(candidate)
+            continue
+        previous = merged[-1]
+        period_difference = abs(previous.period_bp - candidate.period_bp)
+        period_tolerance = max(window, int(0.10 * min(previous.period_bp, candidate.period_bp)))
+        if candidate.start <= previous.end + (2 * window) and period_difference <= period_tolerance:
+            total_length = (previous.end - previous.start) + (
+                candidate.end - candidate.start
+            )
+            coverage = (
+                (previous.coverage * (previous.end - previous.start))
+                + (candidate.coverage * (candidate.end - candidate.start))
+            ) / max(1, total_length)
+            stronger = max(
+                (previous, candidate),
+                key=lambda item: item.coverage * item.contrast,
+            )
+            merged[-1] = PeriodicLagCandidate(
+                start=previous.start,
+                end=max(previous.end, candidate.end),
+                count=previous.count + candidate.count,
+                period_bp=stronger.period_bp,
+                harmonic_lags=stronger.harmonic_lags,
+                coverage=coverage,
+                contrast=min(previous.contrast, candidate.contrast),
+            )
+        else:
+            merged.append(candidate)
+    return merged
+
+
+def _covered_fraction(candidate, existing_candidates):
+    overlaps = []
+    for existing in existing_candidates:
+        start = max(candidate.start, existing.start)
+        end = min(candidate.end, existing.end)
+        if end > start:
+            overlaps.append((start, end))
+    covered = 0
+    if overlaps:
+        current_start, current_end = sorted(overlaps)[0]
+        for start, end in sorted(overlaps)[1:]:
+            if start > current_end:
+                covered += current_end - current_start
+                current_start, current_end = start, end
+            else:
+                current_end = max(current_end, end)
+        covered += current_end - current_start
+    return covered / max(1, candidate.end - candidate.start)
+
+
+def validate_periodic_lag_candidates(
+    fasta_handle,
+    sequence_id,
+    proposals,
+    existing_candidates,
+    *,
+    window,
+    kmer,
+    verbose=False,
+):
+    """Validate uncovered matrix-stripe proposals with sequence spacing peaks."""
+    validated = []
+    for proposal in merge_periodic_lag_candidates(proposals, window):
+        if _covered_fraction(proposal, existing_candidates) >= 0.80:
+            continue
+        sequence = fasta_handle.fetch(sequence_id, proposal.start, proposal.end)
+        if not supports_periodic_lag(
+            sequence,
+            proposal.period_bp,
+            kmer=kmer,
+        ):
+            continue
+        validated.append(
+            WindowCandidate(
+                proposal.start,
+                proposal.end,
+                proposal.count,
+                window,
+                source="periodic_diagonal",
+            )
+        )
+        if verbose:
+            print(
+                "Periodic diagonal rescue: "
+                f"{sequence_id}:{proposal.start:,}-{proposal.end:,} "
+                f"period≈{proposal.period_bp:,} bp "
+                f"coverage={proposal.coverage:.1%}"
+            )
+    return validated
+
+
+def candidate_genomic_ranges(candidates, prefix):
+    """Convert band-local satellite candidates to genomic intervals."""
+    return [
+        (int(prefix) + int(start), int(prefix) + int(end))
+        for start, end, *_rest in candidates
+        if int(end) > int(start)
+    ]
 
 
 def build_band_window_sketches(hashed_band, band_plan, windows, *, sketch):
@@ -365,8 +544,10 @@ def save_matrix_heatmap(
     window,
     identity,
     distal_links=(),
+    satellite_ranges=(),
+    identity_matrix=None,
 ):
-    """Save one low-resolution band matrix heatmap and return its path."""
+    """Save annotated Sobel and high-resolution identity views of one band."""
     plot_directory = os.path.join(output_directory, "matrix_plots")
     os.makedirs(plot_directory, exist_ok=True)
     safe_seq_id = str(seq_id).replace(os.sep, "_")
@@ -376,8 +557,18 @@ def save_matrix_heatmap(
         plot_directory,
         f"{safe_seq_id}_matrix_{matrix_index:04d}.png",
     )
+    identity_path = os.path.join(
+        plot_directory,
+        f"{safe_seq_id}_matrix_{matrix_index:04d}_identity.png",
+    )
     genomic_end = genomic_start + (matrix.shape[0] * window)
     display_matrix, display_scale = downsample_binary_matrix(matrix)
+    edge_overlay = sobel_edge_response(display_matrix)
+    diagonal_ranges = [
+        (int(start) - genomic_start, int(end) - genomic_start)
+        for start, end in satellite_ranges
+        if int(end) > int(start)
+    ]
     highlight_ranges = []
     for link in distal_links:
         # The similarity matrix is symmetric, so show both orientations.
@@ -408,10 +599,44 @@ def save_matrix_heatmap(
         figsize=(5.5, 5.5),
         save_path=plot_path,
         offset=window * display_scale,
+        coordinate_origin=genomic_start,
+        coordinate_end=genomic_end,
+        coordinate_units="Mbp",
         vmin=0,
         vmax=1,
         aspect="equal",
         highlight_ranges=highlight_ranges,
+        diagonal_ranges=diagonal_ranges,
+        edge_overlay=edge_overlay,
+        edge_only=True,
+    )
+    if identity_matrix is None:
+        identity_matrix = np.where(matrix, 100.0, 0.0)
+    identity_display, identity_scale = downsample_numeric_matrix(
+        identity_matrix, max_pixels=1024
+    )
+    plot_matrix(
+        identity_display,
+        title=(
+            f"{seq_id} matrix {matrix_index}: "
+            f"{genomic_start:,}-{genomic_end:,} bp"
+        ),
+        cmap="spectral_11_r",
+        show_colorbar=True,
+        colorbar_label="ANI identity (%)",
+        dpi=160,
+        figsize=(8.5, 7.0),
+        save_path=identity_path,
+        offset=window * identity_scale,
+        coordinate_origin=genomic_start,
+        coordinate_end=genomic_end,
+        coordinate_units="Mbp",
+        colorbar_pad=0.12,
+        reserve_colorbar_space=True,
+        vmin=identity,
+        vmax=100,
+        white_below=identity,
+        aspect="equal",
     )
     return plot_path
 
@@ -426,10 +651,15 @@ def save_adjacent_matrix_heatmap(
     current_index,
     genomic_start,
     window,
+    identity,
     distal_links=(),
     seam_candidates=(),
+    satellite_ranges=(),
+    previous_identity_matrix=None,
+    current_identity_matrix=None,
+    cross_identity_matrix=None,
 ):
-    """Save a sparse two-band view only when the adjacent bridge found evidence."""
+    """Save annotated Sobel and identity views of an adjacent band pair."""
     pair_directory = os.path.join(output_directory, "matrix_pairs")
     os.makedirs(pair_directory, exist_ok=True)
     safe_seq_id = str(seq_id).replace(os.sep, "_")
@@ -439,6 +669,10 @@ def save_adjacent_matrix_heatmap(
         pair_directory,
         f"{safe_seq_id}_matrices_{previous_index:04d}_{current_index:04d}.png",
     )
+    identity_path = os.path.join(
+        pair_directory,
+        f"{safe_seq_id}_matrices_{previous_index:04d}_{current_index:04d}_identity.png",
+    )
     combined = np.block(
         [
             [previous_matrix, cross_matrix],
@@ -446,7 +680,13 @@ def save_adjacent_matrix_heatmap(
         ]
     )
     display_matrix, display_scale = downsample_binary_matrix(combined)
+    edge_overlay = sobel_edge_response(display_matrix)
     genomic_end = genomic_start + (combined.shape[0] * window)
+    diagonal_ranges = [
+        (int(start) - genomic_start, int(end) - genomic_start)
+        for start, end in satellite_ranges
+        if int(end) > int(start)
+    ]
     highlight_ranges = []
     for link in distal_links:
         highlight_ranges.extend(
@@ -466,14 +706,7 @@ def save_adjacent_matrix_heatmap(
             )
         )
     for start, end, _count in seam_candidates:
-        highlight_ranges.append(
-            (
-                start - genomic_start,
-                end - genomic_start,
-                start - genomic_start,
-                end - genomic_start,
-            )
-        )
+        diagonal_ranges.append((start - genomic_start, end - genomic_start))
     plot_matrix(
         display_matrix,
         title=(
@@ -485,10 +718,54 @@ def save_adjacent_matrix_heatmap(
         figsize=(5.5, 5.5),
         save_path=plot_path,
         offset=window * display_scale,
+        coordinate_origin=genomic_start,
+        coordinate_end=genomic_end,
+        coordinate_units="Mbp",
         vmin=0,
         vmax=1,
         aspect="equal",
         highlight_ranges=highlight_ranges,
+        diagonal_ranges=diagonal_ranges,
+        edge_overlay=edge_overlay,
+        edge_only=True,
+    )
+    if previous_identity_matrix is None:
+        previous_identity_matrix = np.where(previous_matrix, 100.0, 0.0)
+    if current_identity_matrix is None:
+        current_identity_matrix = np.where(current_matrix, 100.0, 0.0)
+    if cross_identity_matrix is None:
+        cross_identity_matrix = np.where(cross_matrix, identity, 0.0)
+    identity_combined = np.block(
+        [
+            [previous_identity_matrix, cross_identity_matrix],
+            [cross_identity_matrix.T, current_identity_matrix],
+        ]
+    )
+    identity_display, identity_scale = downsample_numeric_matrix(
+        identity_combined, max_pixels=1024
+    )
+    plot_matrix(
+        identity_display,
+        title=(
+            f"{seq_id}\nmatrices {previous_index}-{current_index}: "
+            f"{genomic_start:,}-{genomic_end:,} bp"
+        ),
+        cmap="spectral_11_r",
+        show_colorbar=True,
+        colorbar_label="ANI identity (%)",
+        dpi=160,
+        figsize=(8.5, 7.0),
+        save_path=identity_path,
+        offset=window * identity_scale,
+        coordinate_origin=genomic_start,
+        coordinate_end=genomic_end,
+        coordinate_units="Mbp",
+        colorbar_pad=0.12,
+        reserve_colorbar_space=True,
+        vmin=identity,
+        vmax=100,
+        white_below=identity,
+        aspect="equal",
     )
     return plot_path
 
@@ -540,6 +817,7 @@ def detect_and_save_matrix_heatmap(
         window,
         identity,
         distal_links=links,
+        satellite_ranges=candidate_genomic_ranges(candidates, genomic_start),
     )
     return plot_path, links
 
@@ -589,6 +867,31 @@ def downsample_binary_matrix(matrix, max_pixels=512):
         padded_columns // scale,
         scale,
     ).any(axis=(1, 3))
+    return pooled, scale
+
+
+def downsample_numeric_matrix(matrix, max_pixels=1024):
+    """Max-pool a numeric identity matrix for a high-resolution plot raster."""
+    values = np.asarray(matrix)
+    if values.ndim != 2:
+        raise ValueError("plot matrix must be two-dimensional")
+    if max_pixels <= 0:
+        raise ValueError("max_pixels must be positive")
+    largest_axis = max(values.shape, default=0)
+    scale = max(1, math.ceil(largest_axis / max_pixels))
+    if scale == 1 or values.size == 0:
+        return values, scale
+
+    padded_rows = math.ceil(values.shape[0] / scale) * scale
+    padded_columns = math.ceil(values.shape[1] / scale) * scale
+    padded = np.zeros((padded_rows, padded_columns), dtype=values.dtype)
+    padded[: values.shape[0], : values.shape[1]] = values
+    pooled = padded.reshape(
+        padded_rows // scale,
+        scale,
+        padded_columns // scale,
+        scale,
+    ).max(axis=(1, 3))
     return pooled, scale
 
 
@@ -923,6 +1226,13 @@ def get_parser():
         ),
     )
     annotate_parser.add_argument(
+        "-j",
+        "--threads",
+        type=thread_count_type,
+        default=MAX_THREADS,
+        help="Maximum total compute threads. Default: all available threads.",
+    )
+    annotate_parser.add_argument(
         "--identifier",
         help="Name of identifier. Used when no matches to a k-mer db are found, or if `--classify` is not provided. bed file to output to. Default: None",
     )
@@ -931,8 +1241,8 @@ def get_parser():
         "--plot",
         action="store_true",
         help=(
-            "Save a low-resolution self-identity heatmap for each band under "
-            "<output directory>/matrix_plots."
+            "Save annotated Sobel and high-resolution Spectral identity views "
+            "for each band under <output directory>/matrix_plots."
         ),
     )
     annotate_parser.add_argument(
@@ -985,6 +1295,13 @@ def get_parser():
     build_db_parser.add_argument(
         "-k", "--kmer", type=int, default=21, help="k-mer length. Default: 21"
     )
+    build_db_parser.add_argument(
+        "-j",
+        "--threads",
+        type=thread_count_type,
+        default=MAX_THREADS,
+        help="Maximum compute threads. Default: all available threads.",
+    )
     build_db_group = build_db_parser.add_mutually_exclusive_group()
     build_db_group.add_argument(
         "-v", "--verbose", action="store_true", help="Enable verbose logging output."
@@ -1033,6 +1350,13 @@ def get_parser():
         help="K-mer length used to calculate repeated-k-mer spacings. Default: 21.",
     )
     ntrprism_parser.add_argument(
+        "-j",
+        "--threads",
+        type=thread_count_type,
+        default=MAX_THREADS,
+        help="Maximum compute threads. Default: all available threads.",
+    )
+    ntrprism_parser.add_argument(
         "--merge-distance",
         type=int,
         default=1,
@@ -1059,6 +1383,8 @@ def main():
     print("─" * 65)
 
     args = get_parser().parse_args()
+    if hasattr(args, "threads"):
+        set_num_threads(args.threads)
 
     # -------- BUILD DB LOGIC --------#
     if args.command == "build_db":
@@ -1188,6 +1514,7 @@ def main():
             print(f"{'Band height:':<{label_width}} {band_height} bp")
             print(f"{'Plot matrices:':<{label_width}} {args.plot}")
             print(f"{'Distal links:':<{label_width}} {args.distal}")
+            print(f"{'Threads:':<{label_width}} {args.threads}")
             print(
                 f"{'Window sizes:':<{label_width}} "
                 f"{', '.join(str(window) for window in windows)} bp"
@@ -1252,6 +1579,7 @@ def main():
                     # Define data structure for satellite coordinates. Variable names for sequence name, length, and if samtools was used for coordinates
                     satellite_coordinate_list = []
                     additional_window_candidates = []
+                    periodic_lag_proposals = []
                     distal_link_list = []
                     distal_accumulator = (
                         CandidateNeighborhoodAccumulator(
@@ -1294,12 +1622,27 @@ def main():
                     )
                     n_windows = band_plan.band_count
                     max_len = band_plan.window_plans[win].max_len
+                    cached_sequence_hashes = load_cached_sequence_hashes(
+                        hash_cache_dir,
+                        fasta,
+                        seq_id,
+                        seq_len,
+                        k_param,
+                    )
+                    matrix_threads, use_hash_process = annotation_thread_allocation(
+                        args.threads,
+                        cache_hit=cached_sequence_hashes is not None,
+                        band_count=band_plan.band_count,
+                    )
+                    set_num_threads(matrix_threads)
                     band_iterator = iter(
                         iter_hashed_fasta_bands(
                             fasta,
                             seq_id,
                             band_plan,
+                            use_process=use_hash_process,
                             cache_dir=hash_cache_dir,
+                            worker_threads=1,
                         )
                     )
                     try:
@@ -1312,16 +1655,17 @@ def main():
                         stage_times["hash_wait"] += (
                             time.perf_counter() - hash_wait_started
                         )
+                        set_num_threads(args.threads)
                         continue
 
-                    if not args.quiet:
-                        print_progress_bar(
-                            0,
-                            n_windows,
-                            prefix="Progress:",
-                            suffix="Complete",
-                            length=40,
-                        )
+                    progress_context = alive_bar(
+                        n_windows,
+                        title=f"Annotating {seq_id}",
+                        unit=" matrix",
+                        disable=args.quiet,
+                        file=sys.stdout,
+                    )
+                    matrix_progress = progress_context.__enter__()
 
                     # Create initial window
                     kmers_list = band_plan.hashes_for_window(first_band, win)
@@ -1343,19 +1687,47 @@ def main():
                             time.perf_counter() - sketch_started
                         )
                     matrix_started = time.perf_counter()
-                    initial_matrix = (
-                        imat(prev_ov, prev_nov, k_param, args.identity)
-                        if args.plot or args.distal
-                        else None
-                    )
-                    spans = get_diagonal_span_from_sets(
+                    if args.plot:
+                        (
+                            initial_identity_matrix,
+                            scan_threshold_matrix,
+                        ) = intersection_matrix_with_threshold(
+                            prev_ov,
+                            prev_nov,
+                            k_param,
+                            args.identity,
+                        )
+                        initial_matrix = initial_identity_matrix >= args.identity
+                    elif args.distal:
+                        initial_identity_matrix = None
+                        initial_matrix = imat(
+                            prev_ov, prev_nov, k_param, args.identity
+                        )
+                        scan_threshold_matrix = initial_matrix
+                    else:
+                        initial_identity_matrix = None
+                        initial_matrix = None
+                        scan_threshold_matrix = None
+                    spans, periodic_proposals = scan_primary_window(
                         prev_ov,
                         prev_nov,
                         win,
                         k_param,
                         args.identity,
-                        zero_tol=2,
+                        threshold_matrix=scan_threshold_matrix,
                     )
+                    for proposal in periodic_proposals:
+                        periodic_lag_proposals.append(
+                            PeriodicLagCandidate(
+                                start=proposal.start + first_band.start,
+                                end=proposal.end + first_band.start,
+                                count=proposal.count,
+                                period_bp=proposal.period_bp,
+                                harmonic_lags=proposal.harmonic_lags,
+                                coverage=proposal.coverage,
+                                contrast=proposal.contrast,
+                            )
+                        )
                     previous_matrix_runtime = time.perf_counter() - matrix_started
                     stage_times["scan"] += previous_matrix_runtime
                     if verbosity:
@@ -1385,14 +1757,7 @@ def main():
                     stage_times["scan"] += additional_scan_runtime
 
                     if n_windows > 1:
-                        if not args.quiet:
-                            print_progress_bar(
-                                1,
-                                n_windows,
-                                prefix="Progress:",
-                                suffix="Complete",
-                                length=40,
-                            )
+                        matrix_progress()
                         # TODO: Remove low count spans
                         """for element in spans:
                             print(element, element[1], element[1]*win, element[0][1]-element[0][0])"""
@@ -1445,8 +1810,12 @@ def main():
                                 win,
                                 args.identity,
                                 distal_links=plot_links,
+                                satellite_ranges=candidate_genomic_ranges(
+                                    distal_candidates, first_band.start
+                                ),
+                                identity_matrix=initial_identity_matrix,
                             )
-                            if not args.quiet:
+                            if verbosity:
                                 print(f"Saved matrix heatmap to {heatmap_path}")
                         stage_times["candidates"] += (
                             time.perf_counter() - candidates_started
@@ -1486,19 +1855,49 @@ def main():
                                 )
 
                             matrix_started = time.perf_counter()
-                            updated_matrix = (
-                                imat(ov, nov, k_param, args.identity)
-                                if args.plot or args.distal
-                                else None
-                            )
-                            new_spans = get_diagonal_span_from_sets(
+                            if args.plot:
+                                (
+                                    updated_identity_matrix,
+                                    scan_threshold_matrix,
+                                ) = intersection_matrix_with_threshold(
+                                    ov,
+                                    nov,
+                                    k_param,
+                                    args.identity,
+                                )
+                                updated_matrix = (
+                                    updated_identity_matrix >= args.identity
+                                )
+                            elif args.distal:
+                                updated_identity_matrix = None
+                                updated_matrix = imat(
+                                    ov, nov, k_param, args.identity
+                                )
+                                scan_threshold_matrix = updated_matrix
+                            else:
+                                updated_identity_matrix = None
+                                updated_matrix = None
+                                scan_threshold_matrix = None
+                            new_spans, periodic_proposals = scan_primary_window(
                                 ov,
                                 nov,
                                 win,
                                 k_param,
                                 args.identity,
-                                zero_tol=2,
+                                threshold_matrix=scan_threshold_matrix,
                             )
+                            for proposal in periodic_proposals:
+                                periodic_lag_proposals.append(
+                                    PeriodicLagCandidate(
+                                        start=proposal.start + hashed_band.start,
+                                        end=proposal.end + hashed_band.start,
+                                        count=proposal.count,
+                                        period_bp=proposal.period_bp,
+                                        harmonic_lags=proposal.harmonic_lags,
+                                        coverage=proposal.coverage,
+                                        contrast=proposal.contrast,
+                                    )
+                                )
                             matrix_runtime = time.perf_counter() - matrix_started
                             stage_times["scan"] += matrix_runtime
                             if verbosity:
@@ -1579,19 +1978,48 @@ def main():
                                         w,
                                         previous_prefix,
                                         win,
+                                        args.identity,
                                         distal_links=bridge.links,
                                         seam_candidates=bridge.seam_candidates,
+                                        satellite_ranges=(
+                                            candidate_genomic_ranges(
+                                                previous_candidates,
+                                                previous_prefix,
+                                            )
+                                            + candidate_genomic_ranges(
+                                                local_candidates,
+                                                prefix_amount,
+                                            )
+                                        ),
+                                        previous_identity_matrix=(
+                                            initial_identity_matrix
+                                        ),
+                                        current_identity_matrix=(
+                                            updated_identity_matrix
+                                        ),
+                                        cross_identity_matrix=(
+                                            intersection_matrix_rectangular(
+                                                prev_ov,
+                                                prev_nov,
+                                                ov,
+                                                nov,
+                                                k_param,
+                                            )
+                                        ),
                                     )
-                                    if not args.quiet:
+                                    if verbosity:
                                         print(
                                             f"Saved adjacent matrix heatmap to {pair_path}"
                                         )
-                            if distal_accumulator is not None:
+                            if distal_accumulator is not None or args.plot:
                                 distal_candidates = combine_band_candidates(
                                     local_candidates,
                                     band_additional_candidates,
                                     prefix_amount,
                                 )
+                            else:
+                                distal_candidates = local_candidates
+                            if distal_accumulator is not None:
                                 distal_accumulator.add_band(
                                     ov,
                                     nov,
@@ -1607,8 +2035,6 @@ def main():
                                         win,
                                     )
                                 )
-                            else:
-                                distal_candidates = local_candidates
                             plot_links = []
                             if args.distal:
                                 plot_links = detect_matrix_distal_links(
@@ -1628,35 +2054,24 @@ def main():
                                     win,
                                     args.identity,
                                     distal_links=plot_links,
+                                    satellite_ranges=candidate_genomic_ranges(
+                                        distal_candidates, prefix_amount
+                                    ),
+                                    identity_matrix=updated_identity_matrix,
                                 )
-                                if not args.quiet:
+                                if verbosity:
                                     print(f"Saved matrix heatmap to {heatmap_path}")
                             stage_times["candidates"] += (
                                 time.perf_counter() - candidates_started
                             )
                             # Roll matrices forward
-                            initial_matrix, prev_ov, prev_nov = updated_matrix, ov, nov
+                            initial_matrix = updated_matrix
+                            initial_identity_matrix = updated_identity_matrix
+                            prev_ov, prev_nov = ov, nov
                             previous_candidates = local_candidates
                             previous_prefix = prefix_amount
 
-                            # Update progress bar
-                            if not args.quiet:
-                                if w == n_windows:
-                                    print_progress_bar(
-                                        n_windows,
-                                        n_windows,
-                                        prefix="Progress:",
-                                        suffix="Completed!\n",
-                                        length=40,
-                                    )
-                                else:
-                                    print_progress_bar(
-                                        w,
-                                        n_windows,
-                                        prefix="Progress:",
-                                        suffix="Complete",
-                                        length=40,
-                                    )
+                            matrix_progress()
 
                     else:
                         # No progress bar in this case
@@ -1705,12 +2120,17 @@ def main():
                                 win,
                                 args.identity,
                                 distal_links=plot_links,
+                                satellite_ranges=candidate_genomic_ranges(
+                                    distal_candidates, first_band.start
+                                ),
+                                identity_matrix=initial_identity_matrix,
                             )
-                            if not args.quiet:
+                            if verbosity:
                                 print(f"Saved matrix heatmap to {heatmap_path}")
                         stage_times["candidates"] += (
                             time.perf_counter() - candidates_started
                         )
+                        matrix_progress()
 
                     # Exhausting the producer commits a newly generated full-sequence
                     # hash cache. A warm cache is simply exhausted already.
@@ -1718,19 +2138,37 @@ def main():
                         band_iterator, stage_times, "hash_wait"
                     ):
                         pass
-                    sequence_hashes = load_cached_sequence_hashes(
-                        hash_cache_dir,
-                        fasta,
-                        seq_id,
-                        seq_len,
-                        k_param,
-                    )
+                    progress_context.__exit__(None, None, None)
+                    set_num_threads(args.threads)
+                    sequence_hashes = cached_sequence_hashes
+                    if sequence_hashes is None:
+                        sequence_hashes = load_cached_sequence_hashes(
+                            hash_cache_dir,
+                            fasta,
+                            seq_id,
+                            seq_len,
+                            k_param,
+                        )
 
                     candidates_started = time.perf_counter()
-                    all_window_candidates = additional_window_candidates + [
+                    conventional_candidates = [
                         WindowCandidate(start, end, count, win)
                         for start, end, count in satellite_coordinate_list
                     ]
+                    periodic_candidates = validate_periodic_lag_candidates(
+                        fh,
+                        seq_id,
+                        periodic_lag_proposals,
+                        additional_window_candidates + conventional_candidates,
+                        window=win,
+                        kmer=k_param,
+                        verbose=verbosity,
+                    )
+                    all_window_candidates = (
+                        additional_window_candidates
+                        + conventional_candidates
+                        + periodic_candidates
+                    )
                     selected_window_candidates = select_multi_window_candidates(
                         all_window_candidates
                     )
@@ -1753,6 +2191,7 @@ def main():
                                     candidate.end + coordinate_offset,
                                     candidate.count,
                                     candidate.window,
+                                    candidate.source,
                                 )
                                 for candidate in selected_window_candidates
                             ]

@@ -81,6 +81,21 @@ def test_same_window_candidates_retain_legacy_non_reconciliation_behavior():
     assert select_multi_window_candidates(candidates) == candidates
 
 
+def test_periodic_rescue_reconciles_with_same_window_fragment():
+    periodic = WindowCandidate(
+        0,
+        100_000,
+        80,
+        1000,
+        source="periodic_diagonal",
+    )
+    selected = select_multi_window_candidates(
+        [periodic, WindowCandidate(80_000, 100_000, 20, 1000)]
+    )
+
+    assert selected == [periodic]
+
+
 def test_selection_audit_records_chosen_window(tmp_path):
     path = write_window_selection(
         tmp_path / "selection.tsv", [WindowCandidate(100, 4100, 4, 1000)]
@@ -88,4 +103,5 @@ def test_selection_audit_records_chosen_window(tmp_path):
 
     contents = path.read_text()
     assert "selected_window_bp" in contents
+    assert "source" in contents
     assert "100\t4100\t4000\t1000" in contents

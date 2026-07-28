@@ -154,6 +154,14 @@ value, and double the supplied value. For example, `-w 5000` scans windows of
 additional resolutions without dense matrices, reconciles overlapping calls,
 and boundary-refines only the winning call at each locus. It also writes a
 `<sequence>_window_selection.tsv` audit file recording the chosen resolution.
+The audit file's `source` column distinguishes ordinary `diagonal` calls from
+`periodic_diagonal` rescues. Periodic rescues target long arrays whose repeat
+unit produces several regularly spaced lines parallel to the main diagonal
+rather than one solid diagonal block. AniAnn's scans a bounded set of diagonal
+lags without materializing a full matrix, requires at least three high-contrast
+harmonics with consistent row coverage, and independently confirms the inferred
+period with NTRPrism before adding the candidate. Broad dense blocks, isolated
+off-diagonal matches, and single parallel lines do not pass this rescue path.
 Comparable spans favor the finer resolution; a coarser call wins when it
 recovers materially more supported array sequence.
 **Default: 2000 (scans 1000, 2000, and 4000).**
@@ -172,6 +180,14 @@ persistent per-user cache shared by every output directory. Set
 `ANIANNS_CACHE_DIR` to change that shared location globally, or use this option
 for one run.
 
+`-j / --threads <INT>`
+
+Maximum total compute concurrency used by AniAnn's. By default, AniAnn's uses
+all threads available to its Numba runtime. During an uncached multi-band run,
+one worker is reserved for streaming k-mer hashes while the remaining workers
+run the matrix kernels. With `--threads 1`, hashing and matrix processing run
+synchronously so the limit is preserved. **Default: all available threads.**
+
 Every annotation run also writes `satellite_dsu.tsv` and a human-readable
 `satellite_dsu.txt`. Each boundary-refined
 satellite is a DSU node, including unlinked singletons. With `--distal`,
@@ -186,10 +202,17 @@ Name of identifier. Used when no matches to a k-mer db are found, or if `--class
 
 `-p / --plot <bool>`
 
-Save a low-resolution PNG heatmap for every `--band` length matrix. Heatmaps are
-collected under `<output directory>/matrix_plots` and are not displayed
-interactively. Plotting alone does not search for distal links and does not add
-red overlays. **Default: disabled.**
+Save two PNGs for every `--band` length matrix under
+`<output directory>/matrix_plots`; plots are not displayed interactively. The
+standard filename is a hollow, edge-only view: cyan intensity shows the
+normalized Sobel gradient response and green outlines show detected diagonal
+satellites. With `--distal`, distal link rectangles are also highlighted in
+red. The companion `_identity.png` file is a higher-resolution, inverted
+11-level Spectral ANI heatmap with an identity colorbar; values below the ANI
+cutoff are white, and it has no Sobel, satellite, distal, or annotation legend.
+Adjacent matrix pairs receive the same two views. Sobel
+is visualization-only and does not affect satellite or distal-link prediction.
+**Default: disabled.**
 
 `--distal`
 

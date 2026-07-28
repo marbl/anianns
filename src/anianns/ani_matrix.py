@@ -113,6 +113,83 @@ def intersection_matrix(overlapping, non_overlapping, k):
 
 
 @njit(cache=True, parallel=True)
+def intersection_matrix_with_threshold(overlapping, non_overlapping, k, identity):
+    """Return exact identities and the threshold predicate in one traversal."""
+    n = len(overlapping)
+    identities = np.empty((n, n), dtype=np.float64)
+    thresholded = np.zeros((n, n), dtype=np.bool_)
+    powk = 1.0 / k
+    minimum_similarity = (identity / 100.0) ** k
+    block_size = 32
+    block_rows, block_columns = _triangular_block_coordinates(n, block_size)
+    for block_index in prange(len(block_rows)):
+        row_start = block_rows[block_index] * block_size
+        row_stop = min(row_start + block_size, n)
+        column_start = block_columns[block_index] * block_size
+        column_stop = min(column_start + block_size, n)
+        for i in range(row_start, row_stop):
+            a = non_overlapping[i]
+            a_prime = overlapping[i]
+            len_a = len(a)
+            first_column = max(i, column_start)
+            for j in range(first_column, column_stop):
+                b = non_overlapping[j]
+                b_prime = overlapping[j]
+                len_b = len(b)
+                if len_a == 0 or len_b == 0:
+                    identities[i, j] = 0.0
+                    identities[j, i] = 0.0
+                    continue
+                inv_len_a = 1.0 / len_a
+                inv_len_b = 1.0 / len_b
+                intersection1 = intersection_len(a, b_prime)
+                intersection2 = intersection_len(a_prime, b)
+                inter1 = intersection1 * inv_len_a
+                inter2 = intersection2 * inv_len_b
+                similarity = max(inter1, inter2)
+                score = (similarity**powk) * 100.0
+                identities[i, j] = score
+                identities[j, i] = score
+                if (
+                    intersection1 >= minimum_similarity * len_a
+                    or intersection2 >= minimum_similarity * len_b
+                ):
+                    thresholded[i, j] = True
+                    thresholded[j, i] = True
+    return identities, thresholded
+
+
+@njit(cache=True, parallel=True)
+def intersection_matrix_rectangular(
+    left_overlapping,
+    left_non_overlapping,
+    right_overlapping,
+    right_non_overlapping,
+    k,
+):
+    """Calculate exact ANI scores between two different window groups."""
+    n_left = len(left_overlapping)
+    n_right = len(right_overlapping)
+    mat = np.empty((n_left, n_right), dtype=np.float64)
+    powk = 1.0 / k
+    for i in prange(n_left):
+        a = left_non_overlapping[i]
+        a_prime = left_overlapping[i]
+        len_a = len(a)
+        for j in range(n_right):
+            b = right_non_overlapping[j]
+            b_prime = right_overlapping[j]
+            len_b = len(b)
+            if len_a == 0 or len_b == 0:
+                mat[i, j] = 0.0
+                continue
+            inter1 = intersection_len(a, b_prime) / len_a
+            inter2 = intersection_len(a_prime, b) / len_b
+            mat[i, j] = (max(inter1, inter2) ** powk) * 100.0
+    return mat
+
+
+@njit(cache=True, parallel=True)
 def intersection_matrix_thresholded(overlapping, non_overlapping, k, identity):
     """Return a compact 0/1 matrix containing only scores above ``identity``."""
     n = len(overlapping)
@@ -283,6 +360,33 @@ def diagonal_span_bounds(
         )
 
     return starts, ends
+
+
+@njit(cache=True, parallel=True)
+def periodic_lag_matches(
+    overlapping,
+    non_overlapping,
+    k,
+    identity,
+    max_lag,
+):
+    """Compare only bounded diagonal offsets for periodic-stripe detection."""
+    n = len(overlapping)
+    bounded_lag = min(max(0, max_lag), max(0, n - 1))
+    matches = np.zeros((bounded_lag + 1, n), dtype=np.bool_)
+    minimum_similarity = (identity / 100.0) ** k
+    for lag in prange(1, bounded_lag + 1):
+        for row_index in range(n - lag):
+            column_index = row_index + lag
+            if passes_identity(
+                non_overlapping[row_index],
+                overlapping[row_index],
+                non_overlapping[column_index],
+                overlapping[column_index],
+                minimum_similarity,
+            ):
+                matches[lag, row_index] = True
+    return matches
 
 
 @njit(cache=True, parallel=True)

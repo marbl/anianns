@@ -11,15 +11,13 @@ import sys
 import tempfile
 from typing import Dict, Iterable, Iterator, Sequence
 
-import mmh3
 import numpy as np
 import pysam
-from numba import njit, prange
+from numba import njit, prange, set_num_threads
 
 from anianns.kmer_utils import tab_b
 
 
-AMBIGUOUS_BASES = frozenset("RYMKSWHBVDN")
 HASH_CACHE_VERSION = 1
 
 
@@ -137,39 +135,6 @@ class SequenceBandPlan:
         return band.hashes[:required]
 
 
-def canonical_kmer_hashes(sequence: str, kmer: int) -> np.ndarray:
-    """
-    Batch canonical mmh3 hashing while preserving existing hash semantics.
-
-    Uppercasing and ambiguous-base detection are performed once per sequence
-    batch rather than once for every overlapping substring. Hash values remain
-    identical to ``generate_kmers_from_fasta`` and therefore remain compatible
-    with existing AniAnn's k-mer databases.
-    """
-    if kmer <= 0:
-        raise ValueError("kmer must be positive")
-
-    sequence = sequence.upper()
-    total_kmers = len(sequence) - kmer + 1
-    if total_kmers <= 0:
-        return np.empty(0, dtype=np.int32)
-
-    hashes = np.zeros(total_kmers, dtype=np.int32)
-    ambiguous_count = sum(base in AMBIGUOUS_BASES for base in sequence[:kmer])
-    for index in range(total_kmers):
-        if ambiguous_count == 0:
-            kmer_string = sequence[index : index + kmer]
-            forward = mmh3.hash(kmer_string, seed=42)
-            reverse = mmh3.hash(kmer_string[::-1].translate(tab_b), seed=42)
-            hashes[index] = forward if forward < reverse else reverse
-
-        if index + 1 < total_kmers:
-            ambiguous_count -= sequence[index] in AMBIGUOUS_BASES
-            ambiguous_count += sequence[index + kmer] in AMBIGUOUS_BASES
-
-    return hashes
-
-
 @njit(cache=True, inline="always")
 def _rotate_left_32(value, shift):
     return np.uint32((value << shift) | (value >> (32 - shift)))
@@ -234,6 +199,85 @@ def _forward_murmurhash3_windows(sequence_bytes, kmer, seed):
     return hashes
 
 
+@njit(cache=True, inline="always")
+def _is_ambiguous_base(value):
+    """Match the historical IUPAC ambiguity filter exactly."""
+    return (
+        value == ord("R")
+        or value == ord("Y")
+        or value == ord("M")
+        or value == ord("K")
+        or value == ord("S")
+        or value == ord("W")
+        or value == ord("H")
+        or value == ord("B")
+        or value == ord("V")
+        or value == ord("D")
+        or value == ord("N")
+    )
+
+
+@njit(cache=True)
+def _canonicalize_forward_hashes(
+    sequence_bytes, forward_hashes, reverse_complement_hashes, kmer
+):
+    """Canonicalize two forward-hash vectors and mask ambiguous windows."""
+    total_kmers = len(forward_hashes)
+    ambiguous_count = 0
+    for index in range(kmer):
+        if _is_ambiguous_base(sequence_bytes[index]):
+            ambiguous_count += 1
+
+    for index in range(total_kmers):
+        if ambiguous_count:
+            forward_hashes[index] = 0
+        else:
+            reverse_hash = reverse_complement_hashes[total_kmers - index - 1]
+            if reverse_hash < forward_hashes[index]:
+                forward_hashes[index] = reverse_hash
+
+        if index + 1 < total_kmers:
+            if _is_ambiguous_base(sequence_bytes[index]):
+                ambiguous_count -= 1
+            if _is_ambiguous_base(sequence_bytes[index + kmer]):
+                ambiguous_count += 1
+    return forward_hashes
+
+
+def canonical_kmer_hashes(sequence: str, kmer: int) -> np.ndarray:
+    """
+    Batch canonical mmh3 hashing while preserving existing hash semantics.
+
+    Every forward k-mer and reverse-complement k-mer is hashed in two parallel
+    Numba passes. Reversing the reverse-complement hash vector aligns it with
+    the original sequence, after which a linear pass selects the canonical
+    minimum and applies the historical ambiguous-base mask.
+    """
+    if kmer <= 0:
+        raise ValueError("kmer must be positive")
+
+    sequence = sequence.upper()
+    total_kmers = len(sequence) - kmer + 1
+    if total_kmers <= 0:
+        return np.empty(0, dtype=np.int32)
+
+    sequence_bytes = np.frombuffer(sequence.encode("ascii"), dtype=np.uint8)
+    reverse_complement = sequence[::-1].translate(tab_b)
+    reverse_complement_bytes = np.frombuffer(
+        reverse_complement.encode("ascii"), dtype=np.uint8
+    )
+    forward_hashes = _forward_murmurhash3_windows(sequence_bytes, kmer, 42)
+    reverse_complement_hashes = _forward_murmurhash3_windows(
+        reverse_complement_bytes, kmer, 42
+    )
+    return _canonicalize_forward_hashes(
+        sequence_bytes,
+        forward_hashes,
+        reverse_complement_hashes,
+        kmer,
+    )
+
+
 def forward_kmer_hashes(sequence: str, kmer: int) -> np.ndarray:
     """Batch forward-only mmh3 hashes without allocating k-mer substrings."""
     if kmer <= 0:
@@ -253,8 +297,11 @@ def _hash_fasta_band(
     sequence_length: int,
     kmer: int,
     request: BandRequest,
+    worker_threads: int = None,
 ) -> HashedBand:
     """Fetch and hash one band. This top-level function is process-picklable."""
+    if worker_threads is not None:
+        set_num_threads(worker_threads)
     fasta = _FASTA_HANDLE_CACHE.get(fasta_path)
     if fasta is None:
         fasta = pysam.FastaFile(fasta_path)
@@ -328,6 +375,7 @@ def _iter_uncached_hashed_fasta_bands(
     plan: SequenceBandPlan,
     *,
     use_process: bool,
+    worker_threads: int,
 ) -> Iterable[HashedBand]:
     """Produce hashed bands without consulting or writing the disk cache."""
     requests = iter(plan.requests())
@@ -355,7 +403,9 @@ def _iter_uncached_hashed_fasta_bands(
             yield _hash_fasta_band(*worker_args, request)
         return
     try:
-        current_future = executor.submit(_hash_fasta_band, *worker_args, first_request)
+        current_future = executor.submit(
+            _hash_fasta_band, *worker_args, first_request, worker_threads
+        )
         while current_future is not None:
             band = current_future.result()
             try:
@@ -365,7 +415,7 @@ def _iter_uncached_hashed_fasta_bands(
             else:
                 # Submit before yielding so hashing overlaps parent matrix work.
                 next_future = executor.submit(
-                    _hash_fasta_band, *worker_args, next_request
+                    _hash_fasta_band, *worker_args, next_request, worker_threads
                 )
             yield band
             current_future = next_future
@@ -380,6 +430,7 @@ def iter_hashed_fasta_bands(
     *,
     use_process: bool = True,
     cache_dir: str = None,
+    worker_threads: int = 1,
 ) -> Iterable[HashedBand]:
     """
     Yield bands in order with at most one future band queued ahead.
@@ -393,7 +444,11 @@ def iter_hashed_fasta_bands(
 
     if cache_dir is None:
         yield from _iter_uncached_hashed_fasta_bands(
-            fasta_path, seq_id, plan, use_process=use_process
+            fasta_path,
+            seq_id,
+            plan,
+            use_process=use_process,
+            worker_threads=worker_threads,
         )
         return
 
@@ -404,7 +459,11 @@ def iter_hashed_fasta_bands(
         cache_path.parent.mkdir(parents=True, exist_ok=True)
     except OSError:
         yield from _iter_uncached_hashed_fasta_bands(
-            fasta_path, seq_id, plan, use_process=use_process
+            fasta_path,
+            seq_id,
+            plan,
+            use_process=use_process,
+            worker_threads=worker_threads,
         )
         return
 
@@ -429,7 +488,11 @@ def iter_hashed_fasta_bands(
         )
     except OSError:
         yield from _iter_uncached_hashed_fasta_bands(
-            fasta_path, seq_id, plan, use_process=use_process
+            fasta_path,
+            seq_id,
+            plan,
+            use_process=use_process,
+            worker_threads=worker_threads,
         )
         return
     temporary_path = Path(temporary.name)
@@ -447,14 +510,22 @@ def iter_hashed_fasta_bands(
         except OSError:
             pass
         yield from _iter_uncached_hashed_fasta_bands(
-            fasta_path, seq_id, plan, use_process=use_process
+            fasta_path,
+            seq_id,
+            plan,
+            use_process=use_process,
+            worker_threads=worker_threads,
         )
         return
 
     cache_writable = True
     try:
         for band in _iter_uncached_hashed_fasta_bands(
-            fasta_path, seq_id, plan, use_process=use_process
+            fasta_path,
+            seq_id,
+            plan,
+            use_process=use_process,
+            worker_threads=worker_threads,
         ):
             core_count = min(plan.band_height, plan.total_kmers - band.start)
             try:
