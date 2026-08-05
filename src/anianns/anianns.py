@@ -1,5 +1,7 @@
 import argparse
+from contextlib import redirect_stderr, redirect_stdout
 import csv
+from datetime import datetime
 from tokenize import group
 from anianns.const import ASCII_ART, DESCRIPTION, VERSION
 from itertools import islice
@@ -48,7 +50,6 @@ from anianns.kmer_utils import (
 
 from anianns.kmer_pipeline import (
     SequenceBandPlan,
-    default_hash_cache_dir,
     iter_hashed_fasta_bands,
     load_cached_sequence_hashes,
 )
@@ -102,6 +103,41 @@ from anianns.union_find import (
 
 
 MAX_THREADS = int(numba_config.NUMBA_NUM_THREADS)
+ANNOTATE_LOG_FILENAME_PATTERN = "anianns_annotation_log_YYYY-MM-DD_HH-MM-SS.txt"
+
+
+def annotate_log_filename(run_time=None):
+    """Return a filesystem-safe log name containing the local run time."""
+    run_time = datetime.now() if run_time is None else run_time
+    return f"anianns_annotation_log_{run_time:%Y-%m-%d_%H-%M-%S}.txt"
+
+
+class TeeTextStream:
+    """Write text to both the terminal stream and a persistent log."""
+
+    def __init__(self, terminal_stream, log_stream):
+        self.terminal_stream = terminal_stream
+        self.log_stream = log_stream
+
+    def write(self, text):
+        self.terminal_stream.write(text)
+        self.log_stream.write(text)
+        return len(text)
+
+    def flush(self):
+        self.terminal_stream.flush()
+        self.log_stream.flush()
+
+    def isatty(self):
+        # Keep progress output readable in the plain-text log.
+        return False
+
+    def fileno(self):
+        return self.terminal_stream.fileno()
+
+    @property
+    def encoding(self):
+        return getattr(self.terminal_stream, "encoding", "utf-8")
 
 
 def thread_count_type(value):
@@ -266,24 +302,39 @@ def run_ntrprism_command(args):
     return report_path, histogram_path
 
 
-def format_matrix_runtime(index, total, runtime, previous_runtime=None):
-    """Format a verbose per-matrix runtime and prior-matrix comparison."""
-    prefix = f"Matrix {index}/{total} completed in {runtime:.3f} s"
-    if previous_runtime is None:
-        return f"{prefix} (comparison baseline)."
+def format_sequence_size(length):
+    """Format a sequence length compactly with decimal genomic units."""
+    length = int(length)
+    if length < 0:
+        raise ValueError("sequence length cannot be negative")
+    if length >= 1_000_000_000:
+        value, unit = length / 1_000_000_000, "gb"
+    elif length >= 1_000_000:
+        value, unit = length / 1_000_000, "mb"
+    else:
+        value, unit = length / 1000, "kb"
 
-    difference = runtime - previous_runtime
-    if abs(difference) < 0.0005:
-        return f"{prefix} — same runtime as matrix {index - 1}."
+    if value >= 100:
+        precision = 0
+    elif value >= 10:
+        precision = 1
+    elif value >= 1:
+        precision = 2
+    else:
+        precision = 3
+    formatted = f"{value:.{precision}f}"
+    if "." in formatted:
+        formatted = formatted.rstrip("0").rstrip(".")
+    return f"{formatted}{unit}"
 
-    direction = "slower" if difference > 0 else "faster"
-    percentage = (
-        abs(difference) / previous_runtime * 100 if previous_runtime > 0 else 0.0
-    )
-    sign = "+" if difference > 0 else "-"
-    return (
-        f"{prefix} — {abs(difference):.3f} s {direction} "
-        f"({sign}{percentage:.1f}%) than matrix {index - 1}."
+
+def announce_matrix_creation(seq_id, sequence_length, cache_hit_dir=None):
+    """Report a verified hash-cache hit immediately before matrix creation."""
+    if cache_hit_dir is not None:
+        print(f"Found hashes in {os.path.abspath(cache_hit_dir)}")
+    print(
+        f"Creating an ANI matrix for {seq_id} "
+        f"({format_sequence_size(sequence_length)}):\n"
     )
 
 
@@ -609,6 +660,7 @@ def save_matrix_heatmap(
         diagonal_ranges=diagonal_ranges,
         edge_overlay=edge_overlay,
         edge_only=True,
+        legend_outside=True,
     )
     if identity_matrix is None:
         identity_matrix = np.where(matrix, 100.0, 0.0)
@@ -728,6 +780,7 @@ def save_adjacent_matrix_heatmap(
         diagonal_ranges=diagonal_ranges,
         edge_overlay=edge_overlay,
         edge_only=True,
+        legend_outside=True,
     )
     if previous_identity_matrix is None:
         previous_identity_matrix = np.where(previous_matrix, 100.0, 0.0)
@@ -1048,11 +1101,11 @@ def promote_unmatched_distal_candidates(
                         promoted_cache[unknown_interval] = refined_interval
                         if verbose:
                             print(
-                                f"Promoted NTR-validated distal satellite at "
+                                f"Promoted distal-supported satellite at "
                                 f"{refined_interval[0]}-{refined_interval[1]}"
                             )
 
-            promoted_interval = promoted_cache[unknown_interval]
+            promoted_interval = promoted_cache.get(unknown_interval)
             if promoted_interval is None:
                 continue
             intervals[unknown_axis] = promoted_interval
@@ -1096,6 +1149,77 @@ def promote_unmatched_distal_candidates(
         periodicities[:] = sorted_periodicities
         hor_flags[:] = sorted_hor_flags
     return deduplicate_distal_links(validated_links)
+
+
+def resolve_overlapping_satellites(
+    starts,
+    ends,
+    names,
+    monomers,
+    periodicities,
+    hor_flags,
+    *,
+    verbose=False,
+):
+    """Make refined satellite intervals sorted and non-overlapping in place.
+
+    Boundary refinement and distal promotion operate on each candidate
+    independently. Two unrelated candidates can therefore acquire slightly
+    conflicting boundary estimates even though neither is a duplicate of the
+    other. Split a partial overlap halfway between those estimates, which makes
+    the smallest symmetric adjustment. If one call is wholly contained in an
+    earlier, longer call, discard the contained call because it cannot be
+    represented as a separate non-overlapping interval.
+    """
+    values = (starts, ends, names, monomers, periodicities, hor_flags)
+    lengths = {len(value) for value in values}
+    if len(lengths) != 1:
+        raise ValueError("satellite metadata lists must have equal lengths")
+
+    satellites = sorted(
+        zip(starts, ends, names, monomers, periodicities, hor_flags),
+        key=lambda satellite: (
+            int(satellite[0]),
+            -(int(satellite[1]) - int(satellite[0])),
+        ),
+    )
+    resolved = []
+    for satellite in satellites:
+        start, end, name, monomer, periodicity, is_hor = satellite
+        current = [int(start), int(end), name, monomer, periodicity, is_hor]
+        if current[1] <= current[0]:
+            continue
+        if not resolved or current[0] >= resolved[-1][1]:
+            resolved.append(current)
+            continue
+
+        previous = resolved[-1]
+        if current[1] <= previous[1]:
+            if verbose:
+                print(
+                    "Discarding contained refined satellite "
+                    f"{current[0]}-{current[1]} inside "
+                    f"{previous[0]}-{previous[1]}."
+                )
+            continue
+
+        old_previous_end = previous[1]
+        old_current_start = current[0]
+        boundary = (old_previous_end + old_current_start) // 2
+        previous[1] = boundary
+        current[0] = boundary
+        if verbose:
+            print(
+                "Resolved overlapping satellite boundaries "
+                f"{previous[0]}-{old_previous_end} and "
+                f"{old_current_start}-{current[1]} at {boundary}."
+            )
+        resolved.append(current)
+
+    columns = list(zip(*resolved)) if resolved else [[] for _ in range(6)]
+    for destination, column in zip(values, columns):
+        destination[:] = list(column)
+    return tuple(values)
 
 
 def get_parser():
@@ -1221,8 +1345,9 @@ def get_parser():
         "--cache-dir",
         default=None,
         help=(
-            "Directory for reusable canonical k-mer hash caches. "
-            "Default: the shared per-user AniAnn's cache."
+            "Opt-in directory for reusable canonical k-mer hash caches. "
+            "A matching cache is loaded when present and created when absent. "
+            "Default: caching disabled."
         ),
     )
     annotate_parser.add_argument(
@@ -1263,6 +1388,15 @@ def get_parser():
         "--quiet",
         action="store_true",
         help="Suppress all logging output and text.",
+    )
+    annotate_parser.add_argument(
+        "--log",
+        action="store_true",
+        help=(
+            "Write verbose output to a timestamped file such as "
+            f"{ANNOTATE_LOG_FILENAME_PATTERN} in the output directory. "
+            "Implies --verbose."
+        ),
     )
 
     build_db_parser.add_argument(
@@ -1378,11 +1512,35 @@ def get_parser():
 
 
 def main():
+    args = get_parser().parse_args()
+    if getattr(args, "quiet", False) and getattr(args, "log", False):
+        return 2
+    if getattr(args, "quiet", False):
+        with open(os.devnull, "w") as null_stream:
+            with redirect_stdout(null_stream), redirect_stderr(null_stream):
+                return _run_command(args)
+
+    if getattr(args, "log", False):
+        args.verbose = True
+        log_directory = args.directory or os.getcwd()
+        os.makedirs(log_directory, exist_ok=True)
+        log_path = os.path.join(log_directory, annotate_log_filename())
+        with open(log_path, "w") as log_stream:
+            with redirect_stdout(TeeTextStream(sys.stdout, log_stream)):
+                with redirect_stderr(TeeTextStream(sys.stderr, log_stream)):
+                    return _run_visible_command(args)
+
+    return _run_visible_command(args)
+
+
+def _run_visible_command(args):
     print(ASCII_ART)
     print(f" {VERSION}")
     print("─" * 65)
+    return _run_command(args)
 
-    args = get_parser().parse_args()
+
+def _run_command(args):
     if hasattr(args, "threads"):
         set_num_threads(args.threads)
 
@@ -1503,7 +1661,7 @@ def main():
         additional_windows = windows[1:]
         interval = (win + 1) // 2
         directory = args.directory or os.getcwd()
-        hash_cache_dir = args.cache_dir or str(default_hash_cache_dir())
+        hash_cache_dir = args.cache_dir
 
         if not args.quiet:
             label_width = 20
@@ -1520,7 +1678,10 @@ def main():
                 f"{', '.join(str(window) for window in windows)} bp"
             )
             print(f"{'ANI threshold:':<{label_width}} {args.identity} %")
-            print(f"{'Hash cache:':<{label_width}} {hash_cache_dir}")
+            print(
+                f"{'Hash cache:':<{label_width}} "
+                f"{hash_cache_dir if hash_cache_dir is not None else 'disabled'}"
+            )
             print(
                 f"{'K-mer dir:':<{label_width}} {args.classify if args.classify else 'None provided'}"
             )
@@ -1594,11 +1755,26 @@ def main():
                     )
                     seq_len = fh.get_reference_length(seq_id)
                     seq_bounds = define_bounds(seq_id)
+                    cached_sequence_hashes = load_cached_sequence_hashes(
+                        hash_cache_dir,
+                        fasta,
+                        seq_id,
+                        seq_len,
+                        k_param,
+                    )
 
                     if seq_bounds and not args.quiet:
                         print(f"Found bounds for {seq_id}: {seq_bounds}\n")
 
-                    print(f"Creating an ANI matrix for {seq_id}:\n")
+                    announce_matrix_creation(
+                        seq_id,
+                        seq_len,
+                        cache_hit_dir=(
+                            hash_cache_dir
+                            if cached_sequence_hashes is not None
+                            else None
+                        ),
+                    )
 
                     if seq_len < k_param:
                         if not args.quiet:
@@ -1622,13 +1798,6 @@ def main():
                     )
                     n_windows = band_plan.band_count
                     max_len = band_plan.window_plans[win].max_len
-                    cached_sequence_hashes = load_cached_sequence_hashes(
-                        hash_cache_dir,
-                        fasta,
-                        seq_id,
-                        seq_len,
-                        k_param,
-                    )
                     matrix_threads, use_hash_process = annotation_thread_allocation(
                         args.threads,
                         cache_hit=cached_sequence_hashes is not None,
@@ -1728,14 +1897,7 @@ def main():
                                 contrast=proposal.contrast,
                             )
                         )
-                    previous_matrix_runtime = time.perf_counter() - matrix_started
-                    stage_times["scan"] += previous_matrix_runtime
-                    if verbosity:
-                        print(
-                            format_matrix_runtime(
-                                1, n_windows, previous_matrix_runtime
-                            )
-                        )
+                    stage_times["scan"] += time.perf_counter() - matrix_started
 
                     (
                         first_additional_candidates,
@@ -1900,16 +2062,6 @@ def main():
                                 )
                             matrix_runtime = time.perf_counter() - matrix_started
                             stage_times["scan"] += matrix_runtime
-                            if verbosity:
-                                print(
-                                    format_matrix_runtime(
-                                        w,
-                                        n_windows,
-                                        matrix_runtime,
-                                        previous_matrix_runtime,
-                                    )
-                                )
-                            previous_matrix_runtime = matrix_runtime
 
                             prefix_amount = hashed_band.start
 
@@ -1997,14 +2149,12 @@ def main():
                                         current_identity_matrix=(
                                             updated_identity_matrix
                                         ),
-                                        cross_identity_matrix=(
-                                            intersection_matrix_rectangular(
-                                                prev_ov,
-                                                prev_nov,
-                                                ov,
-                                                nov,
-                                                k_param,
-                                            )
+                                        cross_identity_matrix=intersection_matrix_rectangular(
+                                            prev_ov,
+                                            prev_nov,
+                                            ov,
+                                            nov,
+                                            k_param,
                                         ),
                                     )
                                     if verbosity:
@@ -2179,6 +2329,15 @@ def main():
                     candidate_windows = [
                         candidate.window for candidate in selected_window_candidates
                     ]
+                    candidate_matrix_support = [
+                        candidate_passes_support(candidate)
+                        for candidate in selected_window_candidates
+                    ]
+                    if verbosity:
+                        print(
+                            f"Found {len(selected_window_candidates)} potential "
+                            "candidates"
+                        )
                     satellite_coordinate_list = filtered
                     if len(windows) > 1:
                         os.makedirs(directory, exist_ok=True)
@@ -2296,37 +2455,6 @@ def main():
                         orient="row",
                     )
 
-                    # TODO: Fix formatting
-                    '''if args.output_format == "bed":
-                        suffix = "bed"
-                    if args.output_format != "bed":
-                        if args.output_format == "gtf":
-                            df_converted = convert_dataframe_format(df1, "gtf")
-                            suffix = "gtf"
-                        elif args.output_format == "gff":
-                            df_converted = convert_dataframe_format(df1, "gff")
-                            suffix = "gff"
-                        elif args.output_format == "csv":
-                            df_converted = convert_dataframe_format(df1, "csv")
-                            suffix = "csv"
-                        elif args.output_format == "tsv":
-                            df_converted = convert_dataframe_format(df1, "tsv")
-                            suffix = "tsv"
-                        elif args.output_format == "json":
-                            df_converted = convert_dataframe_format(df1, "json")
-                            suffix = "json"
-                        else:
-                            sys.exit(f"[ERROR] Unknown output format: {args.output_format}. Defaulting to bed.\n")
-                            suffix = "bed"
-                    else:
-                        suffix = "bed"'''
-                    suffix = "bed"
-                    df_converted = df1
-                    """annotation_file_name = f"{seq_id}_unrefined.{suffix}"
-                    annotation_file_path = os.path.join(directory, annotation_file_name)
-                    os.makedirs(directory, exist_ok=True)
-                    df_converted.write_csv(annotation_file_path, separator="\t")"""
-
                     # If we are using a subseqeunce of a larger fasta, we need to adjust the coordinates back to the original reference frame before outputting
                     refinement_started = time.perf_counter()
                     if seq_bounds:
@@ -2345,6 +2473,7 @@ def main():
                             quiet=args.quiet,
                             sequence_hashes=sequence_hashes,
                             candidate_windows=candidate_windows,
+                            candidate_matrix_support=candidate_matrix_support,
                         )
                         (
                             new_starts,
@@ -2370,6 +2499,7 @@ def main():
                             quiet=args.quiet,
                             sequence_hashes=sequence_hashes,
                             candidate_windows=candidate_windows,
+                            candidate_matrix_support=candidate_matrix_support,
                         )
                         (
                             new_starts,
@@ -2387,6 +2517,15 @@ def main():
                     # Replace the columns in df1
                     output_started = time.perf_counter()
                     coordinate_offset = int(seq_bounds[1]) if seq_bounds else 0
+                    resolve_overlapping_satellites(
+                        new_starts,
+                        new_ends,
+                        new_names,
+                        monomer,
+                        periodicity,
+                        hor,
+                        verbose=verbosity,
+                    )
                     refined_candidates = list(zip(new_starts, new_ends))
                     if args.distal:
                         distal_link_list = filter_candidate_distal_links(
@@ -2414,7 +2553,25 @@ def main():
                             sequence_hashes=sequence_hashes,
                             verbose=verbosity,
                         )
+                        resolve_overlapping_satellites(
+                            new_starts,
+                            new_ends,
+                            new_names,
+                            monomer,
+                            periodicity,
+                            hor,
+                            verbose=verbosity,
+                        )
                         refined_candidates = list(zip(new_starts, new_ends))
+                        distal_link_list = filter_candidate_distal_links(
+                            distal_link_list,
+                            refined_candidates,
+                            proximity=2 * win,
+                        )
+                        distal_link_list = snap_distal_links_to_candidates(
+                            distal_link_list,
+                            refined_candidates,
+                        )
                         tuple_of_lists = (
                             new_starts,
                             new_ends,
@@ -2472,19 +2629,30 @@ def main():
                                 f"Saved {len(distal_link_list)} distal satellite "
                                 f"link(s) to {distal_links_path}"
                             )
+                    output_starts = [
+                        start + coordinate_offset for start in new_starts
+                    ]
+                    output_ends = [end + coordinate_offset for end in new_ends]
+                    item_rgb = satellite_dsu.item_rgb_for_annotations(
+                        seq_id,
+                        output_starts,
+                        output_ends,
+                        monomer,
+                        periodicity,
+                        hor,
+                    )
                     if seq_bounds:
-                        offset = int(seq_bounds[1])
                         df2 = pl.DataFrame(
                             {
                                 "#chrom": [seq_id] * len(new_starts),
-                                "start": [s + offset for s in new_starts],
-                                "end": [e + offset for e in new_ends],
+                                "start": output_starts,
+                                "end": output_ends,
                                 "name": new_names,
                                 "score": [e for e in monomer],
                                 "strand": ["."] * len(new_starts),
-                                "thickStart": [s + offset for s in new_starts],
-                                "thickEnd": [e + offset for e in new_ends],
-                                "itemRgb": ["0,0,0"] * len(new_starts),
+                                "thickStart": output_starts,
+                                "thickEnd": output_ends,
+                                "itemRgb": item_rgb,
                             }
                         )
                     else:
@@ -2498,16 +2666,26 @@ def main():
                                 "strand": ["."] * len(new_starts),
                                 "thickStart": new_starts,
                                 "thickEnd": new_ends,
-                                "itemRgb": ["0,0,0"] * len(new_starts),
+                                "itemRgb": item_rgb,
                             }
                         )
 
-                    bedfilename = f"{seq_id}.bed"
-                    bedfilepath = os.path.join(directory, bedfilename)
+                    output_format = args.output_format.lower()
+                    annotation_filename = f"{seq_id}.{output_format}"
+                    annotation_path = os.path.join(directory, annotation_filename)
                     os.makedirs(directory, exist_ok=True)
-                    df2.write_csv(bedfilepath, separator="\t")
+                    if output_format == "bed":
+                        df2.write_csv(annotation_path, separator="\t")
+                    else:
+                        converted = convert_dataframe_format(df2, output_format)
+                        with open(annotation_path, "w") as annotation_handle:
+                            annotation_handle.write(converted)
 
-                    csvfilename = f"{seq_id}.csv"
+                    csvfilename = (
+                        f"{seq_id}_summary.csv"
+                        if output_format == "csv"
+                        else f"{seq_id}.csv"
+                    )
                     csvfilepath = os.path.join(directory, csvfilename)
                     write_summary_file(tuple_of_lists, csvfilepath)
                     stage_times["output"] += time.perf_counter() - output_started
@@ -2530,7 +2708,8 @@ def main():
                         print(f"  total:              {total_runtime:9.3f} s")
 
                     print(
-                        f"Successfully finished annotating {seq_id} to {bedfilepath}\n"
+                        f"Successfully finished annotating {seq_id} to "
+                        f"{annotation_path}\n"
                     )
 
             satellite_dsu_path = os.path.join(directory, "satellite_dsu.tsv")

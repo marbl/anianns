@@ -47,6 +47,23 @@ def assign_colors(items, palette_name="tab20"):
     return color_map
 
 
+def hashable_ntr_signature(value):
+    """Convert composite NTRPrism metadata into an immutable color key."""
+    if isinstance(value, np.ndarray):
+        value = value.tolist()
+    if isinstance(value, (list, tuple)):
+        return tuple(hashable_ntr_signature(item) for item in value)
+    if isinstance(value, dict):
+        items = (
+            (hashable_ntr_signature(key), hashable_ntr_signature(item))
+            for key, item in value.items()
+        )
+        return tuple(sorted(items, key=repr))
+    if isinstance(value, set):
+        return frozenset(hashable_ntr_signature(item) for item in value)
+    return value
+
+
 def sobel_with_diagonal_probes2(M, thresh=0.6, min_thick=1, figsize=(8, 8)):
     """
     Compute Sobel edges, display the binary edge map, and for each diagonal
@@ -659,6 +676,48 @@ class SatelliteDSU:
                 }
             )
         return rows
+
+    def item_rgb_for_annotations(
+        self,
+        chrom,
+        starts,
+        ends,
+        monomers,
+        periodicities,
+        hor_flags,
+    ):
+        """Color annotations by DSU component and exact NTRPrism signature."""
+        values = list(
+            zip(starts, ends, monomers, periodicities, hor_flags)
+        )
+        color_keys = []
+        for row_number, (start, end, monomer, periodicity, is_hor) in enumerate(
+            values
+        ):
+            index = self.find_satellite(chrom, start, end)
+            if index is None or monomer in (None, 0):
+                # Missing NTRPrism evidence must not cause unrelated calls to
+                # appear matched simply because both values are absent.
+                color_keys.append(("unmatched", str(chrom), row_number))
+                continue
+            color_keys.append(
+                (
+                    "matched",
+                    self.dsu.find(index),
+                    hashable_ntr_signature(monomer),
+                    hashable_ntr_signature(periodicity),
+                    bool(is_hor),
+                )
+            )
+
+        color_map = assign_colors(color_keys)
+        return [
+            ",".join(
+                str(min(255, max(0, int(round(channel * 255)))))
+                for channel in color_map[key]
+            )
+            for key in color_keys
+        ]
 
     def write_tsv(self, output_path):
         """Serialize all nodes and their final connected-component IDs."""

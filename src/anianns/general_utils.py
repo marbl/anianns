@@ -13,6 +13,8 @@ import re
 import matplotlib.pyplot as plt
 from matplotlib.ticker import MaxNLocator
 import csv
+from io import StringIO
+from urllib.parse import quote
 
 plt.rcParams["font.family"] = "sans-serif"
 plt.rcParams["font.sans-serif"] = ["Helvetica", "Arial", "DejaVu Sans"]
@@ -107,43 +109,86 @@ def convert_dataframe_format(df: pl.DataFrame, format: str) -> str:
     """
     format = format.lower()
 
+    chrom_column = "chrom" if "chrom" in df.columns else "#chrom"
+    required = {chrom_column, "start", "end", "name", "score", "strand"}
+    missing = required.difference(df.columns)
+    if missing:
+        raise ValueError(
+            "Input annotation dataframe is missing required column(s): "
+            + ", ".join(sorted(missing))
+        )
+
+    def gtf_escape(value):
+        return (
+            str(value)
+            .replace("\\", "\\\\")
+            .replace('"', '\\"')
+            .replace("\t", " ")
+            .replace("\r", " ")
+            .replace("\n", " ")
+        )
+
     # --- BED → GTF conversion ---
     if format == "gtf":
-        # GTF columns: seqname, source, feature, start, end, score, strand, frame, attribute
-        gtf_df = df.select(
-            [
-                pl.col("chrom").alias("seqname"),
-                pl.lit("converted").alias("source"),
-                pl.lit("exon").alias("feature"),
-                pl.col("start"),
-                pl.col("end"),
-                pl.col("score"),
-                pl.col("strand"),
-                pl.lit(".").alias("frame"),
-                (
-                    pl.concat_str([pl.lit('gene_id "'), pl.col("name"), pl.lit('";')])
-                ).alias("attribute"),
-            ]
-        )
-        return gtf_df.write_csv(None, separator="\t", include_header=False)
+        output = StringIO()
+        for index, row in enumerate(df.iter_rows(named=True), start=1):
+            start, end = int(row["start"]), int(row["end"])
+            if end <= start:
+                continue
+            repeat_id = f"anianns_{index:06d}"
+            repeat_name = gtf_escape(row["name"] or "Unclassified Repeat")
+            monomer = "." if row["score"] is None else str(row["score"])
+            attributes = (
+                f'gene_id "{repeat_id}"; '
+                f'transcript_id "{repeat_id}"; '
+                f'repeat_name "{repeat_name}"; '
+                f'monomer_length "{gtf_escape(monomer)}";'
+            )
+            fields = (
+                row[chrom_column],
+                "AniAnns",
+                "tandem_repeat",
+                start + 1,
+                end,
+                ".",
+                row["strand"] or ".",
+                ".",
+                attributes,
+            )
+            output.write("\t".join(map(str, fields)) + "\n")
+        return output.getvalue()
 
     # --- BED → GFF conversion ---
     elif format == "gff":
-        # GFF columns: seqid, source, type, start, end, score, strand, phase, attributes
-        gff_df = df.select(
-            [
-                pl.col("chrom").alias("seqid"),
-                pl.lit("converted").alias("source"),
-                pl.lit("region").alias("type"),
-                pl.col("start"),
-                pl.col("end"),
-                pl.col("score"),
-                pl.col("strand"),
-                pl.lit(".").alias("phase"),
-                (pl.concat_str([pl.lit("ID="), pl.col("name")])).alias("attributes"),
-            ]
-        )
-        return gff_df.write_csv(None, separator="\t", include_header=False)
+        output = StringIO()
+        output.write("##gff-version 3\n")
+        for index, row in enumerate(df.iter_rows(named=True), start=1):
+            start, end = int(row["start"]), int(row["end"])
+            if end <= start:
+                continue
+            repeat_id = f"anianns_{index:06d}"
+            repeat_name = quote(str(row["name"] or "Unclassified Repeat"), safe="")
+            monomer = (
+                "."
+                if row["score"] is None
+                else quote(str(row["score"]), safe="")
+            )
+            attributes = (
+                f"ID={repeat_id};Name={repeat_name};monomer_length={monomer}"
+            )
+            fields = (
+                row[chrom_column],
+                "AniAnns",
+                "tandem_repeat",
+                start + 1,
+                end,
+                ".",
+                row["strand"] or ".",
+                ".",
+                attributes,
+            )
+            output.write("\t".join(map(str, fields)) + "\n")
+        return output.getvalue()
 
     # --- CSV ---
     elif format == "csv":
@@ -406,6 +451,7 @@ def plot_matrix(
     vmin=86,
     vmax=100,
     aspect="auto",
+    legend_outside=False,
 ):
     import numpy as np
     import matplotlib.pyplot as plt
@@ -580,7 +626,16 @@ def plot_matrix(
             )
         )
     if legend_handles:
-        ax.legend(handles=legend_handles, loc="lower right", fontsize=6)
+        if legend_outside:
+            fig.legend(
+                handles=legend_handles,
+                loc="center left",
+                bbox_to_anchor=(0.78, 0.5),
+                borderaxespad=0,
+                fontsize=6,
+            )
+        else:
+            ax.legend(handles=legend_handles, loc="lower right", fontsize=6)
 
         """# --- cross-region (off-diagonal) rectangles ---
     if highlight_ranges is not None:
@@ -634,7 +689,11 @@ def plot_matrix(
             fig.subplots_adjust(left=0.12, right=0.76, bottom=0.12, top=0.88)
         fig.colorbar(im, ax=ax, label=colorbar_label, pad=colorbar_pad)
 
-    if not reserve_colorbar_space:
+    if legend_outside:
+        # Keep overlay labels out of the data axes and reserve enough room for
+        # all three handles without changing the matrix's square aspect.
+        fig.tight_layout(rect=(0, 0, 0.76, 1))
+    elif not reserve_colorbar_space:
         plt.tight_layout()
     if save_path:
         save_kwargs = {} if aspect == "equal" else {"bbox_inches": "tight"}

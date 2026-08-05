@@ -7,7 +7,6 @@ import math
 import multiprocessing
 import os
 from pathlib import Path
-import sys
 import tempfile
 from typing import Dict, Iterable, Iterator, Sequence
 
@@ -19,25 +18,6 @@ from anianns.kmer_utils import tab_b
 
 
 HASH_CACHE_VERSION = 1
-
-
-def default_hash_cache_dir() -> Path:
-    """Return a persistent per-user cache shared by annotation outputs."""
-    configured = os.environ.get("ANIANNS_CACHE_DIR")
-    if configured:
-        return Path(configured).expanduser()
-
-    if sys.platform == "darwin":
-        cache_root = Path.home() / "Library" / "Caches"
-    elif os.name == "nt":
-        cache_root = Path(
-            os.environ.get("LOCALAPPDATA", Path.home() / "AppData" / "Local")
-        )
-    else:
-        cache_root = Path(
-            os.environ.get("XDG_CACHE_HOME", Path.home() / ".cache")
-        )
-    return cache_root / "anianns" / "hashes"
 
 
 @dataclass(frozen=True)

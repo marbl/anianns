@@ -68,20 +68,54 @@ def test_check_bed_vs_indexed_fasta(monkeypatch, capsys):
 
 def test_convert_dataframe_format_supports_multiple_targets(bed_like_df):
     gtf = convert_dataframe_format(bed_like_df, "gtf")
-    assert "converted\texon" in gtf
-    assert "alpha" in gtf
+    first_gtf = gtf.splitlines()[0].split("\t")
+    assert first_gtf[:5] == ["chr1", "AniAnns", "tandem_repeat", "11", "15"]
+    assert first_gtf[5:8] == [".", ".", "."]
+    assert 'gene_id "anianns_000001";' in first_gtf[8]
+    assert 'repeat_name "alpha";' in first_gtf[8]
+    assert 'monomer_length "0";' in first_gtf[8]
 
     gff = convert_dataframe_format(bed_like_df, "gff")
-    assert "ID=beta" in gff
+    assert gff.startswith("##gff-version 3\n")
+    assert "ID=anianns_000002;Name=beta;monomer_length=1" in gff
 
     csv_output = convert_dataframe_format(bed_like_df, "csv")
     assert "chrom,start,end,name" in csv_output
+
+    tsv_output = convert_dataframe_format(bed_like_df, "tsv")
+    assert "chrom\tstart\tend\tname" in tsv_output
 
     json_output = convert_dataframe_format(bed_like_df, "json")
     assert '"chrom":"chr1"' in json_output
 
     with pytest.raises(ValueError):
         convert_dataframe_format(bed_like_df, "xlsx")
+
+
+def test_convert_dataframe_format_accepts_final_bed_chrom_column():
+    output = convert_dataframe_format(
+        pl.DataFrame(
+            {
+                "#chrom": ["chr2_hap1"],
+                "start": [666461],
+                "end": [687827],
+                "name": [None],
+                "score": [37],
+                "strand": ["."],
+            }
+        ),
+        "gtf",
+    )
+
+    fields = output.rstrip("\n").split("\t")
+    assert fields[:5] == [
+        "chr2_hap1",
+        "AniAnns",
+        "tandem_repeat",
+        "666462",
+        "687827",
+    ]
+    assert 'repeat_name "Unclassified Repeat";' in fields[8]
 
 
 def test_define_bounds_parses_supported_identifiers():
@@ -229,6 +263,31 @@ def test_plot_matrix_validates_inputs(monkeypatch, tmp_path):
         save_path=save_path,
     )
     assert save_path.exists()
+
+
+def test_plot_matrix_can_place_overlay_legend_outside_axes(monkeypatch, tmp_path):
+    captured = {}
+    monkeypatch.setattr(
+        "anianns.general_utils.plt.close",
+        lambda figure: captured.setdefault("figure", figure),
+    )
+
+    plot_matrix(
+        pl.DataFrame([[0, 1], [1, 0]]).to_numpy(),
+        edge_overlay=pl.DataFrame([[True, False], [False, True]]).to_numpy(),
+        edge_only=True,
+        diagonal_ranges=[(0, 1)],
+        highlight_ranges=[(1, 2, 0, 1)],
+        legend_outside=True,
+        show_colorbar=False,
+        save_path=tmp_path / "outside-legend.png",
+    )
+
+    figure = captured["figure"]
+    assert figure.axes[0].get_legend() is None
+    assert len(figure.legends) == 1
+    labels = [text.get_text() for text in figure.legends[0].get_texts()]
+    assert labels == ["Sobel edges", "Detected satellite", "Distal link"]
 
 
 def test_read_bed_files_skips_headers_and_casts_coordinates(tmp_path):

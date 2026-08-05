@@ -67,3 +67,45 @@ def test_satellite_dsu_does_not_union_unmatched_distal_endpoint():
         "chr1", 100, 200, "chr1", 800, 900
     )
     assert all(row["component_size"] == 1 for row in satellites.component_rows())
+
+
+def test_item_rgb_requires_both_dsu_and_matching_ntrprism_values():
+    satellites = SatelliteDSU()
+    first = satellites.add_satellite("chr1", 100, 200, monomer=171)
+    second = satellites.add_satellite("chr1", 300, 400, monomer=171)
+    different_prism = satellites.add_satellite("chr1", 500, 600, monomer=5)
+    different_dsu = satellites.add_satellite("chr1", 700, 800, monomer=171)
+    missing_first = satellites.add_satellite("chr1", 900, 1000, monomer=None)
+    missing_second = satellites.add_satellite("chr1", 1100, 1200, monomer=None)
+    different_hor = satellites.add_satellite(
+        "chr1", 1300, 1400, monomer=171, periodicity=2, is_hor=True
+    )
+    different_periodicity = satellites.add_satellite(
+        "chr1", 1500, 1600, monomer=171, periodicity=[2, 4]
+    )
+    satellites.union(first, second)
+    satellites.union(second, different_prism)
+    satellites.union(missing_first, missing_second)
+    satellites.union(second, different_hor)
+    satellites.union(second, different_periodicity)
+
+    colors = satellites.item_rgb_for_annotations(
+        "chr1",
+        [100, 300, 500, 700, 900, 1100, 1300, 1500],
+        [200, 400, 600, 800, 1000, 1200, 1400, 1600],
+        [171, 171, 5, 171, None, None, 171, 171],
+        [[2, 3], [2, 3], None, None, None, None, 2, [2, 4]],
+        [False, False, False, False, False, False, True, False],
+    )
+
+    assert colors[0] == colors[1]
+    assert colors[2] != colors[0]
+    assert colors[3] != colors[0]
+    assert colors[4] != colors[5]
+    assert colors[6] != colors[0]
+    assert colors[7] != colors[0]
+    assert all(
+        len(color.split(",")) == 3
+        and all(0 <= int(channel) <= 255 for channel in color.split(","))
+        for color in colors
+    )

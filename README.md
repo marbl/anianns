@@ -1,4 +1,5 @@
 ![Release](https://img.shields.io/github/v/release/marbl/anianns?sort=semver&label=stable%20release)
+[![PyPI version](https://img.shields.io/pypi/v/anianns.svg?label=PyPI)](https://pypi.org/project/anianns/)
 ![Coverage](https://img.shields.io/codecov/c/github/marbl/anianns?label=coverage)
 ![Black](https://img.shields.io/badge/code%20style-black-000000.svg)
 
@@ -71,7 +72,7 @@ Once installed, confirm _AniAnn's_ was installed correctly by running `python -m
  /_/   \_\_| |_|_|/_/   \_\_| |_|_| |_| |___/   :` .'._.'. `;
                                                 '-`'.___.'`-'
 
-usage: anianns [-h] {annotate,build_db} ...
+usage: anianns [-h] {annotate,build_db,ntrprism} ...
 
 Ani Ann's: ANI Inferred ANNotation of Tandem Repeats
 
@@ -122,6 +123,9 @@ Name of output directory. **Default: current working directory.**
 
 Output annotation file format. Options are BED, GTF, GFF, CSV, TSV, JSON. **Default: BED.**
 
+GTF and GFF output uses 1-based inclusive coordinates, `tandem_repeat` features,
+and includes the AniAnn's repeat name and inferred monomer length in the attributes.
+
 `-m / --mask <ALL>`
 
 Name or repeat length of satellite arrays to mask. Replaces deteced satellites with N's. See [Repeat Masking](#repeat-masking) for more info. **Default: None.**
@@ -152,8 +156,17 @@ The central dotplot window size. AniAnn's automatically scans half, the supplied
 value, and double the supplied value. For example, `-w 5000` scans windows of
 2500, 5000, and 10000 bp. AniAnn's hashes each sequence band once, scans the
 additional resolutions without dense matrices, reconciles overlapping calls,
-and boundary-refines only the winning call at each locus. It also writes a
-`<sequence>_window_selection.tsv` audit file recording the chosen resolution.
+and boundary-refines only the winning call at each locus. If the initial
+right-boundary range has no supported transition, refinement searches back to
+the left using k-mers observed at least three times in the candidate core. This
+prevents an unresolved call from defaulting to a matrix-band endpoint. It also
+writes a `<sequence>_window_selection.tsv` audit file recording the chosen
+resolution.
+Boundary refinement runs NTRPrism at both k=6 and the user-selected k-mer
+length. A candidate passes when either resolution finds sufficient spacing
+support. If both reject, AniAnn's removes the candidate even when its matrix or
+distal signal is strong, so final annotations never use a monomer score of 0 as
+a fallback.
 The audit file's `source` column distinguishes ordinary `diagonal` calls from
 `periodic_diagonal` rescues. Periodic rescues target long arrays whose repeat
 unit produces several regularly spaced lines parallel to the main diagonal
@@ -175,10 +188,11 @@ visualization or distal-link detection. **Default: 2.**
 
 `--cache-dir <DIR>`
 
-Directory for reusable canonical k-mer hashes. By default, AniAnn's uses a
-persistent per-user cache shared by every output directory. Set
-`ANIANNS_CACHE_DIR` to change that shared location globally, or use this option
-for one run.
+Opt in to reusable canonical k-mer hashing. When the directory contains a
+matching cache for the FASTA sequence and k-mer size, AniAnn's loads it;
+otherwise AniAnn's creates the cache during the run. Without `--cache-dir`,
+hashes are streamed in memory and no disk cache is read or created.
+**Default: caching disabled.**
 
 `-j / --threads <INT>`
 
@@ -194,7 +208,10 @@ satellite is a DSU node, including unlinked singletons. With `--distal`,
 validated distal links
 union their two satellite nodes, so chains of distal relationships share one
 stable `component_id`; the table also reports component size and direct-link
-count.
+count. BED `itemRgb` values are shared only by satellites that have both the
+same DSU component and the same retained NTRPrism signature (monomer,
+periodicity, and HOR status). Missing NTRPrism monomers are not grouped by
+color.
 
 `--identifier <STR>`
 
@@ -221,8 +238,9 @@ Detected off-diagonal blocks are written to
 `<sequence>_distal_links.bedpe`, and used to link satellites in the DSU. A
 compact cross-band matrix and its genomic coordinates are saved to
 `<sequence>_distal_neighborhood.npz`; two neighboring windows on either side of
-each candidate are retained. An unmatched distal axis must pass NTR Prism and
-boundary refinement before it is added to BED/CSV or linked in the DSU.
+each candidate are retained. An unmatched distal axis must pass NTR
+Prism and boundary refinement before it is added to BED/CSV or linked in the
+DSU. Strong distal support cannot rescue an endpoint rejected at both k values.
 Neighboring bands are bridged with bounded candidate-to-all comparisons in both
 directions plus a 50-window seam scan. With both `--distal --plot`, links are
 outlined in red. When the bridge finds evidence, a sparse
@@ -230,13 +248,29 @@ two-band heatmap is saved under `matrix_pairs/`; adjacent pairs are then skipped
 by the final global comparison to avoid duplicate work.
 **Default: disabled.**
 
-`--verbose <bool>`
+`--verbose`
 
-Verbose logging output. Creates a log file at `--directory`. **Default: None.**
+Show stage timings, the number of potential candidates, concise acceptance or
+removal reasons for each boundary-refined candidate, and resolved boundary
+histograms. Per-matrix timing comparisons and unresolved extension histograms
+are omitted. Each candidate begins with a labeled separator, and every boundary
+histogram line is capped at 80 characters, including searches that resolve after
+extending the initial boundary range. **Default: disabled.**
 
-`--quiet <bool>`
+`--log`
 
-Suppress all logging output. **Default: None.**
+Write the verbose output to a timestamped file in the selected output directory
+while continuing to show it in the terminal. The filename records the local run
+date and time, for example
+`anianns_annotation_log_2026-08-04_14-37-52.txt`. This option implies
+`--verbose` and cannot be combined with `--quiet`.
+**Default: disabled.**
+
+`--quiet`
+
+Suppress all stdout and stderr output, including the AniAnn's banner, sequence
+status, progress bars, warnings, and completion messages. Output files are
+still written normally. **Default: disabled.**
 
 #### Sample run
 

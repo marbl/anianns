@@ -704,7 +704,7 @@ def detect_adjacent_band_bridge(
     *,
     seam_halo_windows=50,
 ):
-    """Link neighboring plot bands without materializing a merged full matrix."""
+    """Link neighboring bands with candidate-to-all strips and a seam scan."""
     previous_count = len(previous_overlapping)
     current_count = len(current_overlapping)
     cross_matrix = np.zeros((previous_count, current_count), dtype=np.bool_)
@@ -765,9 +765,9 @@ def detect_adjacent_band_bridge(
             k,
             identity,
         )
-        cross_matrix[np.ix_(previous_seam_indices, current_seam_indices)] |= (
-            seam_matrix
-        )
+        cross_matrix[
+            np.ix_(previous_seam_indices, current_seam_indices)
+        ] |= seam_matrix
         previous_starts = previous_prefix + (previous_seam_indices * window)
         current_starts = current_prefix + (current_seam_indices * window)
         seam_candidates = _detect_seam_candidates(

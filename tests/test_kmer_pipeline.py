@@ -1,6 +1,5 @@
 import numpy as np
 import pysam
-from pathlib import Path
 
 from anianns import kmer_pipeline
 from anianns.kmer_pipeline import (
@@ -13,19 +12,6 @@ from anianns.kmer_pipeline import (
 )
 from anianns.kmer_utils import generate_kmers_from_fasta
 from anianns.kmer_utils import generate_kmers_from_fasta_forward_only
-
-
-def test_default_hash_cache_is_shared_and_configurable(monkeypatch, tmp_path):
-    configured = tmp_path / "shared-cache"
-    monkeypatch.setenv("ANIANNS_CACHE_DIR", str(configured))
-
-    assert kmer_pipeline.default_hash_cache_dir() == configured
-
-    monkeypatch.delenv("ANIANNS_CACHE_DIR")
-    monkeypatch.setattr(Path, "home", classmethod(lambda cls: tmp_path))
-    default = kmer_pipeline.default_hash_cache_dir()
-    assert default.name == "hashes"
-    assert default.parent.name == "anianns"
 
 
 def test_canonical_kmer_hashes_match_existing_generator_exactly():

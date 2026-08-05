@@ -7,6 +7,17 @@ from anianns import refine_boundaries as refine
 PRISM_RESULT = (171, False, None, [])
 
 
+def test_recurrent_kmer_set_requires_three_occurrences():
+    hashes = np.repeat(np.arange(30, dtype=np.int32), 3)
+    hashes = np.concatenate((hashes, np.array([100, 100, 0], dtype=np.int32)))
+
+    result = refine.recurrent_kmer_set(hashes)
+
+    assert result == set(range(1, 30))
+    assert 100 not in result
+    assert 0 not in result
+
+
 def test_find_last_matching_index_clamps_out_of_range_search():
     assert refine.find_last_matching_index([10, 20, 30], {20}, 0, 100) == 1
     assert refine.find_last_matching_index([10, 20, 30], {10}, -20, 1) == 0
@@ -47,6 +58,59 @@ def test_fixed_window_search_counts_repeated_matching_kmers():
     )
 
 
+def test_boundary_histogram_is_suppressed_when_search_requires_extension(capsys):
+    border_kmers = ([7] * 10) + ([0] * 90)
+
+    result = refine.find_target_fixed_window_right(
+        {7}, border_kmers, 100, 1000, True, step_size=10
+    )
+
+    assert result == 0
+    assert capsys.readouterr().out == ""
+
+
+def test_resolved_boundary_histogram_omits_stop_index(capsys):
+    border_kmers = ([0] * 50) + ([7] * 10) + ([0] * 40)
+
+    result = refine.find_target_fixed_window_right(
+        {7}, border_kmers, 100, 1000, True, step_size=10
+    )
+
+    output = capsys.readouterr().out
+    assert result == 5
+    assert "#" in output
+    assert "Boundary stop index" not in output
+    assert "Find right boundary point" not in output
+
+
+def test_boundary_histogram_lines_never_exceed_80_characters(capsys):
+    border_kmers = ([0] * 50) + ([7] * 100) + ([0] * 850)
+
+    result = refine.find_target_fixed_window_right(
+        {7},
+        border_kmers,
+        1000,
+        12_345_678,
+        True,
+        step_size=100,
+    )
+
+    lines = capsys.readouterr().out.splitlines()
+    assert result == 14
+    assert lines
+    assert max(map(len, lines)) <= 80
+
+
+def test_boundary_graph_coordinate_labels_never_exceed_80_characters():
+    label = refine.boundary_graph_label_line(
+        123_456_789_012_345_678_901,
+        987_654_321_098_765_432_109,
+        73,
+    )
+
+    assert len(label) <= 80
+
+
 def test_detect_precise_boundaries_preserves_candidate_when_extension_fails(
     monkeypatch,
 ):
@@ -68,6 +132,151 @@ def test_detect_precise_boundaries_preserves_candidate_when_extension_fails(
     )
 
     assert result == (100, 500, None, PRISM_RESULT)
+
+
+def test_precise_boundaries_rejects_even_with_distal_metadata(monkeypatch):
+    monkeypatch.setattr(refine, "extract_region", lambda **kwargs: "ACTG" * 100)
+    monkeypatch.setattr(
+        refine, "ntr_prism", lambda *args, **kwargs: (None, False, None)
+    )
+    monkeypatch.setattr(refine, "detect_left_boundary", lambda **kwargs: 90)
+    monkeypatch.setattr(refine, "detect_right_boundary", lambda **kwargs: 510)
+
+    result = refine.detect_precise_boundaries(
+        fasta_file="input.fa",
+        seq_id="chr1",
+        seq_len=1000,
+        window=20,
+        k=21,
+        coordinates=(100, 500),
+        verbose=False,
+        classify=False,
+        previous_coordinates=(0, 1),
+    )
+
+    assert result is None
+
+
+def test_precise_boundaries_still_rejects_without_distal_override(monkeypatch):
+    monkeypatch.setattr(refine, "extract_region", lambda **kwargs: "ACTG" * 100)
+    monkeypatch.setattr(
+        refine, "ntr_prism", lambda *args, **kwargs: (None, False, None)
+    )
+
+    result = refine.detect_precise_boundaries(
+        fasta_file="input.fa",
+        seq_id="chr1",
+        seq_len=1000,
+        window=20,
+        k=21,
+        coordinates=(100, 500),
+        verbose=False,
+        classify=False,
+        previous_coordinates=(0, 1),
+    )
+
+    assert result is None
+
+
+def test_precise_boundaries_accepts_k6_when_user_k_rejects(monkeypatch, capsys):
+    k6_result = (68, False, None, [])
+    observed_kmers = []
+    monkeypatch.setattr(refine, "extract_region", lambda **kwargs: "ACTG" * 100)
+
+    def fake_prism(_sequence, _size, kmer, **_kwargs):
+        observed_kmers.append(kmer)
+        return k6_result if kmer == 6 else (None, False, None)
+
+    monkeypatch.setattr(refine, "ntr_prism", fake_prism)
+    monkeypatch.setattr(refine, "detect_left_boundary", lambda **kwargs: 90)
+    monkeypatch.setattr(refine, "detect_right_boundary", lambda **kwargs: 510)
+
+    result = refine.detect_precise_boundaries(
+        fasta_file="input.fa",
+        seq_id="chr1",
+        seq_len=1000,
+        window=20,
+        k=21,
+        coordinates=(100, 500),
+        verbose=True,
+        classify=False,
+        previous_coordinates=(0, 1),
+        strong_matrix_evidence=True,
+    )
+
+    assert observed_kmers == [21, 6]
+    assert result == (90, 510, None, k6_result)
+    assert capsys.readouterr().out == (
+        "Accepted candidate 100-500:\n"
+        "    Strong matrix support\n"
+        "    NTRPrism k=6: monomer=68 bp\n"
+        "    NTRPrism k=21 (user-selected): rejected\n"
+        "    Estimated left boundary: 90\n"
+        "    Estimated right boundary: 510\n"
+    )
+
+
+def test_precise_boundaries_uses_k6_instead_of_zero_user_k_result(monkeypatch):
+    k6_result = (68, False, None, [])
+    monkeypatch.setattr(refine, "extract_region", lambda **kwargs: "ACTG" * 100)
+    monkeypatch.setattr(
+        refine,
+        "ntr_prism",
+        lambda _sequence, _size, kmer, **_kwargs: (
+            k6_result if kmer == 6 else (0, False, None, [])
+        ),
+    )
+    monkeypatch.setattr(refine, "detect_left_boundary", lambda **kwargs: 90)
+    monkeypatch.setattr(refine, "detect_right_boundary", lambda **kwargs: 510)
+
+    result = refine.detect_precise_boundaries(
+        fasta_file="input.fa",
+        seq_id="chr1",
+        seq_len=1000,
+        window=20,
+        k=21,
+        coordinates=(100, 500),
+        verbose=False,
+        classify=False,
+        previous_coordinates=(0, 1),
+    )
+
+    assert result == (90, 510, None, k6_result)
+
+
+def test_strong_matrix_evidence_cannot_override_both_ntr_rejections(
+    monkeypatch, capsys
+):
+    observed_kmers = []
+    monkeypatch.setattr(refine, "extract_region", lambda **kwargs: "ACTG" * 100)
+
+    def reject(_sequence, _size, kmer, **_kwargs):
+        observed_kmers.append(kmer)
+        return None, False, None
+
+    monkeypatch.setattr(refine, "ntr_prism", reject)
+    monkeypatch.setattr(refine, "detect_left_boundary", lambda **kwargs: 90)
+    monkeypatch.setattr(refine, "detect_right_boundary", lambda **kwargs: 510)
+
+    result = refine.detect_precise_boundaries(
+        fasta_file="input.fa",
+        seq_id="chr1",
+        seq_len=1000,
+        window=20,
+        k=21,
+        coordinates=(100, 500),
+        verbose=True,
+        classify=False,
+        previous_coordinates=(0, 1),
+        strong_matrix_evidence=True,
+    )
+
+    assert observed_kmers == [21, 6]
+    assert result is None
+    assert capsys.readouterr().out == (
+        "Removed candidate 100-500: NTRPrism rejected at k=21 and k=6; "
+        "matrix support was strong.\n"
+    )
 
 
 def test_detect_precise_boundaries_accepts_zero_as_valid_left_boundary(monkeypatch):
@@ -127,6 +336,41 @@ def test_right_boundary_extends_search_instead_of_returning_none(monkeypatch):
     assert searched == [[2]]
 
 
+def test_right_boundary_searches_left_after_empty_initial_range(monkeypatch):
+    border_hashes = iter([np.array([1]), np.array([2])])
+    monkeypatch.setattr(
+        refine, "region_canonical_hashes", lambda *args, **kwargs: next(border_hashes)
+    )
+    targets = iter([None, 2])
+    observed_sets = []
+
+    def fake_target(**kwargs):
+        observed_sets.append(kwargs["array_kmer_set"])
+        return next(targets)
+
+    monkeypatch.setattr(refine, "find_target_fixed_window_right", fake_target)
+    monkeypatch.setattr(refine, "find_last_matching_index", lambda *args: 250)
+
+    result = refine.detect_right_boundary(
+        fasta_file="input.fa",
+        array_seq="ARRAY",
+        array_seq_size=100,
+        seq_id="chr1",
+        boundary_point=1000,
+        limit=None,
+        k=4,
+        window=100,
+        interval=50,
+        boundary_chunk_size=100,
+        boundary=2000,
+        array_kmer_set={9},
+        fallback_array_kmer_set={7},
+    )
+
+    assert result == 904
+    assert observed_sets == [{9}, {7}]
+
+
 def test_left_boundary_extension_searches_updated_kmers(monkeypatch):
     border_hashes = iter([np.array([1]), np.array([2])])
     monkeypatch.setattr(
@@ -164,7 +408,7 @@ def test_left_boundary_extension_searches_updated_kmers(monkeypatch):
     assert searched == [[2]]
 
 
-def test_report_borders_keeps_candidate_when_refinement_raises(monkeypatch):
+def test_report_borders_drops_candidate_when_refinement_raises(monkeypatch):
     monkeypatch.setattr(
         refine,
         "detect_precise_boundaries",
@@ -186,7 +430,32 @@ def test_report_borders_keeps_candidate_when_refinement_raises(monkeypatch):
         quiet=True,
     )
 
-    assert result == ([101], [501], [None], [0], [None], [False])
+    assert result == ([], [], [], [], [], [])
+
+
+def test_report_borders_drops_result_with_zero_ntr_monomer(monkeypatch):
+    monkeypatch.setattr(
+        refine,
+        "detect_precise_boundaries",
+        lambda **kwargs: (*kwargs["coordinates"], None, (0, False, None, [])),
+    )
+    df = pl.DataFrame({"start": [100], "end": [500]})
+
+    result = refine.report_borders(
+        fa="input.fa",
+        seq_id="chr1",
+        seq_len=1000,
+        band=2.0,
+        offset=0,
+        window=20,
+        k=21,
+        df=df,
+        classify=False,
+        verbose=False,
+        quiet=True,
+    )
+
+    assert result == ([], [], [], [], [], [])
 
 
 def test_report_borders_does_not_merge_unrelated_band_edge_candidates(monkeypatch):
@@ -220,6 +489,44 @@ def test_report_borders_does_not_merge_unrelated_band_edge_candidates(monkeypatc
     )
 
     assert calls == [(1_900_001, 2_000_001), (2_500_001, 2_600_001)]
+
+
+def test_report_borders_labels_and_separates_verbose_candidates(
+    monkeypatch, capsys
+):
+    monkeypatch.setattr(
+        refine,
+        "detect_precise_boundaries",
+        lambda **kwargs: (*kwargs["coordinates"], None, PRISM_RESULT),
+    )
+    df = pl.DataFrame(
+        {"start": [100, 10_000], "end": [500, 20_000]}
+    )
+
+    refine.report_borders(
+        fa="input.fa",
+        seq_id="chr1",
+        seq_len=30_000,
+        band=2.0,
+        offset=0,
+        window=1000,
+        k=21,
+        df=df,
+        classify=False,
+        verbose=True,
+        quiet=False,
+    )
+
+    output = capsys.readouterr().out
+    separator = "=" * refine.BOUNDARY_GRAPH_MAX_WIDTH
+    assert output.count(separator) == 2
+    assert (
+        "Analyzing candidate: left boundary=101, right boundary=501" in output
+    )
+    assert (
+        "Analyzing candidate: left boundary=10001, right boundary=20001"
+        in output
+    )
 
 
 def test_report_borders_merges_candidates_that_share_the_same_band_edge(monkeypatch):
@@ -281,6 +588,35 @@ def test_report_borders_uses_each_candidates_selected_window(monkeypatch):
     )
 
     assert calls == [((101, 501), 1000), ((10_001, 20_001), 4000)]
+
+
+def test_report_borders_propagates_candidate_matrix_support(monkeypatch):
+    observed = []
+
+    def fake_detect(**kwargs):
+        observed.append(kwargs["strong_matrix_evidence"])
+        return (*kwargs["coordinates"], None, PRISM_RESULT)
+
+    monkeypatch.setattr(refine, "detect_precise_boundaries", fake_detect)
+    df = pl.DataFrame({"start": [100, 10_000], "end": [500, 20_000]})
+
+    refine.report_borders(
+        fa="input.fa",
+        seq_id="chr1",
+        seq_len=30_000,
+        band=2.0,
+        offset=0,
+        window=1000,
+        candidate_windows=[1000, 4000],
+        candidate_matrix_support=[True, False],
+        k=21,
+        df=df,
+        classify=False,
+        verbose=False,
+        quiet=True,
+    )
+
+    assert observed == [True, False]
 
 
 def test_report_borders_uses_finer_window_when_merging_band_pieces(monkeypatch):
