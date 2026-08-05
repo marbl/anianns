@@ -162,10 +162,11 @@ right-boundary range has no supported transition, refinement searches back to
 the left using k-mers observed at least three times in the candidate core. This
 prevents an unresolved call from defaulting to a matrix-band endpoint.
 Boundary refinement runs NTRPrism at both k=6 and the user-selected k-mer
-length. A candidate passes when either resolution finds sufficient spacing
-support. If both reject, AniAnn's removes the candidate even when its matrix or
-distal signal is strong, so final annotations never use a monomer score below 3
-bp as a fallback. Periodic rescues target long arrays whose repeat unit produces
+length. A significant k=6 result supplies the monomer estimate; the
+user-selected k-mer result is used only when k=6 rejects. If both reject,
+AniAnn's removes the candidate even when its matrix or distal signal is strong,
+so final annotations never use a monomer score below 3 bp as a fallback.
+Periodic rescues target long arrays whose repeat unit produces
 several regularly spaced lines parallel to the main diagonal rather than one
 solid diagonal block. AniAnn's scans a bounded set of diagonal lags without
 materializing a full matrix, requires at least three high-contrast harmonics

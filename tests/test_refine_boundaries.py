@@ -205,7 +205,7 @@ def test_precise_boundaries_accepts_k6_when_user_k_rejects(monkeypatch, capsys):
         strong_matrix_evidence=True,
     )
 
-    assert observed_kmers == [21, 6]
+    assert observed_kmers == [6, 21]
     assert result == (90, 510, None, k6_result)
     assert capsys.readouterr().out == (
         "Accepted candidate 100-500:\n"
@@ -248,6 +248,66 @@ def test_precise_boundaries_uses_k6_instead_of_subminimum_user_k_result(
     assert result == (90, 510, None, k6_result)
 
 
+def test_precise_boundaries_prioritizes_k6_when_both_results_are_valid(monkeypatch):
+    k6_result = (68, False, None, [])
+    user_result = (1974, False, None, [])
+    monkeypatch.setattr(refine, "extract_region", lambda **kwargs: "ACTG" * 100)
+    monkeypatch.setattr(
+        refine,
+        "ntr_prism",
+        lambda _sequence, _size, kmer, **_kwargs: (
+            k6_result if kmer == 6 else user_result
+        ),
+    )
+    monkeypatch.setattr(refine, "detect_left_boundary", lambda **kwargs: 90)
+    monkeypatch.setattr(refine, "detect_right_boundary", lambda **kwargs: 510)
+
+    result = refine.detect_precise_boundaries(
+        fasta_file="input.fa",
+        seq_id="chr1",
+        seq_len=1000,
+        window=20,
+        k=21,
+        coordinates=(100, 500),
+        verbose=False,
+        classify=False,
+        previous_coordinates=(0, 1),
+    )
+
+    assert result == (90, 510, None, k6_result)
+
+
+@pytest.mark.parametrize("invalid_monomer", [None, 0, 1, 2])
+def test_precise_boundaries_falls_back_to_user_k_when_k6_is_not_significant(
+    monkeypatch, invalid_monomer
+):
+    user_result = (171, False, None, [])
+    monkeypatch.setattr(refine, "extract_region", lambda **kwargs: "ACTG" * 100)
+    monkeypatch.setattr(
+        refine,
+        "ntr_prism",
+        lambda _sequence, _size, kmer, **_kwargs: (
+            (invalid_monomer, False, None, []) if kmer == 6 else user_result
+        ),
+    )
+    monkeypatch.setattr(refine, "detect_left_boundary", lambda **kwargs: 90)
+    monkeypatch.setattr(refine, "detect_right_boundary", lambda **kwargs: 510)
+
+    result = refine.detect_precise_boundaries(
+        fasta_file="input.fa",
+        seq_id="chr1",
+        seq_len=1000,
+        window=20,
+        k=21,
+        coordinates=(100, 500),
+        verbose=False,
+        classify=False,
+        previous_coordinates=(0, 1),
+    )
+
+    assert result == (90, 510, None, user_result)
+
+
 def test_strong_matrix_evidence_cannot_override_both_ntr_rejections(
     monkeypatch, capsys
 ):
@@ -275,10 +335,10 @@ def test_strong_matrix_evidence_cannot_override_both_ntr_rejections(
         strong_matrix_evidence=True,
     )
 
-    assert observed_kmers == [21, 6]
+    assert observed_kmers == [6, 21]
     assert result is None
     assert capsys.readouterr().out == (
-        "Removed candidate 100-500: NTRPrism rejected at k=21 and k=6; "
+        "Removed candidate 100-500: NTRPrism rejected at k=6 and k=21; "
         "matrix support was strong.\n"
     )
 

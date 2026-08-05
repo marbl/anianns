@@ -458,19 +458,17 @@ def detect_precise_boundaries(
             )
         return None
 
-    user_prism_res = ntr_prism(core_seq, core_seq_size, k)
-    k6_prism_res = (
-        user_prism_res if int(k) == 6 else ntr_prism(core_seq, core_seq_size, 6)
+    k6_prism_res = ntr_prism(core_seq, core_seq_size, 6)
+    user_prism_res = (
+        k6_prism_res if int(k) == 6 else ntr_prism(core_seq, core_seq_size, k)
     )
-    prism_res = (
-        user_prism_res if has_valid_ntr_monomer(user_prism_res) else k6_prism_res
-    )
+    prism_res = k6_prism_res if has_valid_ntr_monomer(k6_prism_res) else user_prism_res
     # Matrix and distal evidence can nominate candidates, but cannot replace
     # direct repeat-period evidence for the candidate itself.
     if not has_valid_ntr_monomer(prism_res):
         if verbose:
             evidence = "strong" if strong_matrix_evidence else "weak"
-            rejected_k = "k=6" if int(k) == 6 else f"k={k} and k=6"
+            rejected_k = "k=6" if int(k) == 6 else f"k=6 and k={k}"
             print(
                 f"Removed candidate {candidate_start}-{candidate_end}: "
                 f"NTRPrism rejected at {rejected_k}; matrix support was "
