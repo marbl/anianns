@@ -1,7 +1,8 @@
-![Release](https://img.shields.io/github/v/release/marbl/anianns?sort=semver&label=stable%20release)
-[![PyPI version](https://img.shields.io/pypi/v/anianns.svg?label=PyPI)](https://pypi.org/project/anianns/)
-![Coverage](https://img.shields.io/codecov/c/github/marbl/anianns?label=coverage)
-![Black](https://img.shields.io/badge/code%20style-black-000000.svg)
+[![Tests](https://img.shields.io/github/actions/workflow/status/marbl/anianns/tests.yml?branch=main&label=tests)](https://github.com/marbl/anianns/actions/workflows/tests.yml)
+[![PyPI version](https://img.shields.io/pypi/v/anianns)](https://pypi.org/project/anianns/)
+[![Python versions](https://img.shields.io/pypi/pyversions/anianns)](https://pypi.org/project/anianns/)
+[![Coverage](https://img.shields.io/codecov/c/github/marbl/anianns?label=coverage)](https://app.codecov.io/gh/marbl/anianns)
+[![License](https://img.shields.io/github/license/marbl/anianns)](https://github.com/marbl/anianns/blob/main/LICENSE)
 
 ![](images/anianns_logo.png)
 
