@@ -134,8 +134,7 @@ def analyze_kmer_spacings(
         return [], 0
     values, counts = np.unique(distances, return_counts=True)
     raw_counts = {
-        int(value): int(count)
-        for value, count in zip(values.tolist(), counts.tolist())
+        int(value): int(count) for value, count in zip(values.tolist(), counts.tolist())
     }
     return merge_spacing_counts(raw_counts, merge_distance), int(len(distances))
 
@@ -150,7 +149,7 @@ def supports_periodic_lag(
     max_peaks: int = 100,
 ) -> bool:
     """Confirm that sequence spacing peaks explain a matrix-derived period."""
-    if period_bp <= 0 or len(sequence) < kmer:
+    if period_bp < 3 or len(sequence) < kmer:
         return False
     peaks, _total_distances = analyze_kmer_spacings(sequence, kmer=kmer)
     for peak in peaks[:max_peaks]:
@@ -302,8 +301,7 @@ def write_spacing_histogram(
         ]
         strongest = {peak.spacing for peak in peaks[:10]}
         colors = [
-            "#F4A261" if peak.spacing in strongest else "#1F7A8C"
-            for peak in shown
+            "#F4A261" if peak.spacing in strongest else "#1F7A8C" for peak in shown
         ]
         axis.bar(
             positions,

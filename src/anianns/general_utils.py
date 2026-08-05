@@ -39,6 +39,7 @@ def clean_genomic_ticks(start, end, target_intervals=4):
         ticks[-1] = end
     return ticks
 
+
 from anianns.kmer_utils import (
     generate_kmers_from_fasta,
     generate_kmers_from_fasta_forward_only,
@@ -168,14 +169,8 @@ def convert_dataframe_format(df: pl.DataFrame, format: str) -> str:
                 continue
             repeat_id = f"anianns_{index:06d}"
             repeat_name = quote(str(row["name"] or "Unclassified Repeat"), safe="")
-            monomer = (
-                "."
-                if row["score"] is None
-                else quote(str(row["score"]), safe="")
-            )
-            attributes = (
-                f"ID={repeat_id};Name={repeat_name};monomer_length={monomer}"
-            )
+            monomer = "." if row["score"] is None else quote(str(row["score"]), safe="")
+            attributes = f"ID={repeat_id};Name={repeat_name};monomer_length={monomer}"
             fields = (
                 row[chrom_column],
                 "AniAnns",

@@ -49,9 +49,7 @@ def test_mask_type_and_parser_defaults():
     assert not hasattr(args, "distal_halo")
     assert args.output_format == "bed"
 
-    dense_args = parser.parse_args(
-        ["annotate", "-f", "input.fa", "--sketch", "2"]
-    )
+    dense_args = parser.parse_args(["annotate", "-f", "input.fa", "--sketch", "2"])
     assert dense_args.sketch == 2
     assert args.band == 2.0
 
@@ -80,15 +78,11 @@ def test_mask_type_and_parser_defaults():
     with pytest.raises(SystemExit):
         parser.parse_args(["annotate", "-f", "input.fa", "--no-cache"])
 
-    multi_args = parser.parse_args(
-        ["annotate", "-f", "input.fa", "-w", "5000"]
-    )
+    multi_args = parser.parse_args(["annotate", "-f", "input.fa", "-w", "5000"])
     assert cli.derive_window_sizes(multi_args.window) == (2500, 5000, 10_000)
 
     with pytest.raises(SystemExit):
-        parser.parse_args(
-            ["annotate", "-f", "input.fa", "-w", "1000", "2000"]
-        )
+        parser.parse_args(["annotate", "-f", "input.fa", "-w", "1000", "2000"])
 
 
 def test_format_sequence_size_uses_scaled_decimal_units():
@@ -110,25 +104,20 @@ def test_annotate_log_filename_contains_run_date_and_time():
     )
 
 
-def test_cache_hit_is_announced_immediately_before_matrix_creation(
-    tmp_path, capsys
-):
+def test_cache_hit_is_announced_immediately_before_matrix_creation(tmp_path, capsys):
     cache_dir = tmp_path / "hashes"
 
     cli.announce_matrix_creation("chr2", 100_000_000, cache_dir)
 
     assert capsys.readouterr().out == (
-        f"Found hashes in {cache_dir}\n"
-        "Creating an ANI matrix for chr2 (100mb):\n\n"
+        f"Found hashes in {cache_dir}\n" "Creating an ANI matrix for chr2 (100mb):\n\n"
     )
 
 
 def test_matrix_creation_without_cache_has_no_hash_notice(capsys):
     cli.announce_matrix_creation("chr2", 100_000_000)
 
-    assert capsys.readouterr().out == (
-        "Creating an ANI matrix for chr2 (100mb):\n\n"
-    )
+    assert capsys.readouterr().out == ("Creating an ANI matrix for chr2 (100mb):\n\n")
 
 
 def test_annotation_thread_allocation_preserves_total_budget():
@@ -163,7 +152,7 @@ def test_distal_candidates_include_supported_calls_from_other_windows():
     ]
 
 
-def test_write_distal_links_emits_bedpe_metrics_and_offset(tmp_path):
+def test_write_distal_links_emits_ten_column_bedpe_and_offset(tmp_path):
     output_path = tmp_path / "links.bedpe"
     cli.write_distal_links(
         [
@@ -185,15 +174,19 @@ def test_write_distal_links_emits_bedpe_metrics_and_offset(tmp_path):
     )
 
     rows = list(csv.reader(output_path.open(), delimiter="\t"))
-    assert rows[0][:6] == [
+    assert rows[0] == [
         "#chrom1",
         "start1",
         "end1",
         "chrom2",
         "start2",
         "end2",
+        "name",
+        "score",
+        "strand1",
+        "strand2",
     ]
-    assert rows[1][:11] == [
+    assert rows[1] == [
         "chr1",
         "10100",
         "10500",
@@ -204,8 +197,43 @@ def test_write_distal_links_emits_bedpe_metrics_and_offset(tmp_path):
         "750",
         ".",
         ".",
-        "candidate",
     ]
+
+
+def test_write_distal_summary_records_support_metrics_and_offset(tmp_path):
+    output_path = tmp_path / "chr1_distal_summary.txt"
+    cli.write_distal_summary(
+        [
+            DistalSatelliteLink(
+                100,
+                500,
+                1000,
+                1800,
+                "candidate",
+                0.75,
+                0.8,
+                0.9,
+                42,
+            )
+        ],
+        "chr1",
+        output_path,
+        coordinate_offset=10_000,
+    )
+
+    assert output_path.read_text() == (
+        "Accepted distal satellite pairs for chr1\n"
+        "Count: 1\n"
+        "\n"
+        "Accepted satellite pair 1\n"
+        "  Satellite 1: chr1:10100-10500\n"
+        "  Satellite 2: chr1:11000-11800\n"
+        "  Score: 750\n"
+        "  Density: 0.750000\n"
+        "  Row coverage: 0.800000\n"
+        "  Column coverage: 0.900000\n"
+        "  Hit count: 42\n"
+    )
 
 
 def test_promote_unmatched_distal_candidate_after_ntr_validation(monkeypatch):
@@ -278,9 +306,7 @@ def test_rejects_unmatched_distal_candidate_when_ntr_fails_and_link_is_weak(
 def test_strong_distal_link_cannot_override_ntr_rejection(monkeypatch):
     starts, ends = [100], [500]
     names, monomers, periodicities, hor_flags = ["telomere"], [6], [None], [False]
-    link = DistalSatelliteLink(
-        100, 500, 1000, 1400, "component", 0.55, 1.0, 1.0, 100
-    )
+    link = DistalSatelliteLink(100, 500, 1000, 1400, "component", 0.55, 1.0, 1.0, 100)
     observed = {}
 
     def fake_boundaries(**kwargs):
@@ -318,9 +344,7 @@ def test_ntr_rejected_endpoint_is_not_retried_for_stronger_link(monkeypatch):
     weak = DistalSatelliteLink(
         100, 500, 1000, 1400, "candidate_to_all", 0.4, 0.9, 0.9, 100
     )
-    strong = DistalSatelliteLink(
-        100, 500, 1000, 1400, "component", 0.55, 1.0, 1.0, 100
-    )
+    strong = DistalSatelliteLink(100, 500, 1000, 1400, "component", 0.55, 1.0, 1.0, 100)
     attempts = []
 
     def fake_boundaries(**kwargs):
@@ -403,7 +427,9 @@ def test_resolve_overlapping_satellites_splits_unrelated_boundary_estimates():
 
     assert list(zip(starts, ends)) == [(666461, 687827), (687827, 697156)]
     assert monomers == [37, 5]
-    assert all(left_end <= right_start for left_end, right_start in zip(ends, starts[1:]))
+    assert all(
+        left_end <= right_start for left_end, right_start in zip(ends, starts[1:])
+    )
 
 
 def test_resolve_overlapping_satellites_discards_contained_call():
@@ -449,7 +475,20 @@ def test_main_build_db_creates_output_files(monkeypatch, tmp_path, capsys):
         {"chrom": ["chr1"], "start": [1], "end": [5], "name": ["AlphaSat"]}
     )
 
-    monkeypatch.setattr(sys, "argv", ["anianns", "build_db", "-f", "input.fa", "-b", "input.bed", "-d", str(tmp_path)])
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "anianns",
+            "build_db",
+            "-f",
+            "input.fa",
+            "-b",
+            "input.bed",
+            "-d",
+            str(tmp_path),
+        ],
+    )
     monkeypatch.setattr(cli, "read_bed_files", lambda files: [bed_df])
     monkeypatch.setattr(cli, "check_bed_vs_indexed_fasta", lambda bed, fasta: True)
     monkeypatch.setattr(
@@ -465,9 +504,7 @@ def test_main_build_db_creates_output_files(monkeypatch, tmp_path, capsys):
 
     cli.main()
 
-    assert saved == [
-        ({"alphasat": {11, 22, 33}}, 21, str(tmp_path / "alphasat.db"))
-    ]
+    assert saved == [({"alphasat": {11, 22, 33}}, 21, str(tmp_path / "alphasat.db"))]
     assert "Building a k-mer database" in capsys.readouterr().out
 
 
@@ -478,6 +515,7 @@ def test_main_build_db_creates_output_files(monkeypatch, tmp_path, capsys):
         (True, False, "bed", False),
         (False, True, "bed", False),
         (True, True, "bed", False),
+        (False, True, "bed", True),
         (False, False, "gtf", False),
     ],
 )
@@ -513,8 +551,12 @@ def test_main_annotate_writes_requested_format_and_summary(
         "argv",
         argv,
     )
-    monkeypatch.setattr(cli, "get_input_headers", lambda fasta: [("input.fa", ["chr1"])])
-    monkeypatch.setattr(cli.pysam, "FastaFile", lambda path: FakeFastaFile({"chr1": "A" * 100}))
+    monkeypatch.setattr(
+        cli, "get_input_headers", lambda fasta: [("input.fa", ["chr1"])]
+    )
+    monkeypatch.setattr(
+        cli.pysam, "FastaFile", lambda path: FakeFastaFile({"chr1": "A" * 100})
+    )
     monkeypatch.setattr(
         cli,
         "iter_hashed_fasta_bands",
@@ -578,6 +620,7 @@ def test_main_annotate_writes_requested_format_and_summary(
         "get_diagonal_span_from_sets",
         lambda ov, nov, win, k, identity, zero_tol: [((0, 20), 12)],
     )
+
     def fake_plot(matrix, **kwargs):
         calls["plot"] += 1
         calls["highlights"].append(kwargs.get("highlight_ranges"))
@@ -592,7 +635,9 @@ def test_main_annotate_writes_requested_format_and_summary(
 
     monkeypatch.setattr(cli, "plot_matrix", fake_plot)
     monkeypatch.setattr(cli, "detect_matrix_distal_links", lambda *args: [])
-    monkeypatch.setattr(cli, "get_diagonal_span", lambda matrix, win, zero_tol: [((0, 20), 12)])
+    monkeypatch.setattr(
+        cli, "get_diagonal_span", lambda matrix, win, zero_tol: [((0, 20), 12)]
+    )
     monkeypatch.setattr(
         cli,
         "merge_shared_boundaries",
@@ -629,17 +674,20 @@ def test_main_annotate_writes_requested_format_and_summary(
         rows = list(csv.DictReader(handle))
     assert rows[0]["name"] == "HSAT"
     assert rows[0]["intervals"] == "2-18"
-    dsu_rows = list(
-        csv.DictReader((tmp_path / "satellite_dsu.tsv").open(), delimiter="\t")
-    )
-    assert len(dsu_rows) == 1
-    assert dsu_rows[0]["chrom"] == "chr1"
-    assert dsu_rows[0]["start"] == "2"
-    assert dsu_rows[0]["end"] == "18"
-    assert dsu_rows[0]["component_size"] == "1"
-    dsu_text = (tmp_path / "satellite_dsu.txt").read_text()
-    assert "Total satellites: 1" in dsu_text
-    assert "chr1:2-18 name=HSAT" in dsu_text
+    dsu_tsv_path = tmp_path / "satellite_dsu.tsv"
+    dsu_text_path = tmp_path / "satellite_dsu.txt"
+    assert dsu_tsv_path.exists() is distal
+    assert dsu_text_path.exists() is distal
+    if distal:
+        dsu_rows = list(csv.DictReader(dsu_tsv_path.open(), delimiter="\t"))
+        assert len(dsu_rows) == 1
+        assert dsu_rows[0]["chrom"] == "chr1"
+        assert dsu_rows[0]["start"] == "2"
+        assert dsu_rows[0]["end"] == "18"
+        assert dsu_rows[0]["component_size"] == "1"
+        dsu_text = dsu_text_path.read_text()
+        assert "Total satellites: 1" in dsu_text
+        assert "chr1:2-18 name=HSAT" in dsu_text
     assert calls["dense"] == (2 if plot or distal else 0)
     assert calls["plot"] == expected_plot_calls
     if plot and not distal:
@@ -653,8 +701,7 @@ def test_main_annotate_writes_requested_format_and_summary(
         assert all(calls["diagonal"][index] for index in raw_indexes)
         assert all(calls["diagonal"][index] is None for index in identity_indexes)
         assert all(
-            calls["cmaps"][index] == "spectral_11_r"
-            for index in identity_indexes
+            calls["cmaps"][index] == "spectral_11_r" for index in identity_indexes
         )
         assert all(calls["colorbars"][index] for index in identity_indexes)
         assert all(calls["white_below"][index] == 86 for index in identity_indexes)
@@ -673,9 +720,8 @@ def test_main_annotate_writes_requested_format_and_summary(
     )
     assert not list(tmp_path.glob("*_matrix.npy"))
     assert not list(tmp_path.glob("*_distal_*_matrix.npy"))
-    assert (
-        tmp_path / "chr1_distal_neighborhood.npz"
-    ).exists() is distal
+    assert not list(tmp_path.glob("*_window_selection.tsv"))
+    assert not (tmp_path / "chr1_distal_neighborhood.npz").exists()
     links_path = tmp_path / "chr1_distal_links.bedpe"
     assert links_path.exists() is distal
     if links_path.exists():
@@ -692,6 +738,12 @@ def test_main_annotate_writes_requested_format_and_summary(
         assert " potential candidates" in log_text
         assert "Matrix 1/" not in log_text
         assert cli.VERSION in log_text
+        distal_summary_path = tmp_path / "chr1_distal_summary.txt"
+        assert distal_summary_path.exists() is distal
+        if distal:
+            assert "Accepted distal satellite pairs for chr1" in (
+                distal_summary_path.read_text()
+            )
     else:
         assert captured.out == ""
         assert captured.err == ""
@@ -712,9 +764,7 @@ def test_quiet_and_log_conflict_is_silent(monkeypatch, capsys):
 
 def test_distal_option_can_be_combined_with_plot():
     parser = cli.get_parser()
-    args = parser.parse_args(
-        ["annotate", "-f", "input.fa", "--distal", "--plot"]
-    )
+    args = parser.parse_args(["annotate", "-f", "input.fa", "--distal", "--plot"])
     assert args.distal is True
     assert args.plot is True
 
@@ -836,6 +886,7 @@ def test_validate_ntrprism_range_out_of_bounds(monkeypatch, capsys):
         ],
     )
     import pytest
+
     with pytest.raises(SystemExit) as exc_info:
         cli.main()
     assert exc_info.value.code == 1

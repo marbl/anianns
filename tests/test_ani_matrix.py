@@ -176,9 +176,7 @@ def test_combined_identity_matrix_preserves_both_existing_results():
         for size in (60, 45, 0, 70, 30)
     ]
 
-    expected_identity = intersection_matrix.py_func(
-        overlapping, non_overlapping, 21
-    )
+    expected_identity = intersection_matrix.py_func(overlapping, non_overlapping, 21)
     expected_threshold = intersection_matrix_thresholded.py_func(
         overlapping, non_overlapping, 21, 86
     )
@@ -216,9 +214,7 @@ def test_matrix_free_diagonal_scan_matches_dense_matrix_spans():
         np.array([8, 9, 10, 11], dtype=np.int32),
     ]
     non_overlapping = [value.copy() for value in overlapping]
-    dense = intersection_matrix_thresholded.py_func(
-        overlapping, non_overlapping, 2, 75
-    )
+    dense = intersection_matrix_thresholded.py_func(overlapping, non_overlapping, 2, 75)
 
     assert get_diagonal_span_from_sets(
         overlapping, non_overlapping, 1000, 2, 75, 2
@@ -232,9 +228,7 @@ def test_matrix_free_diagonal_scan_matches_dense_randomized_inputs():
         for _ in range(20)
     ]
     overlapping = [value.copy() for value in non_overlapping]
-    dense = intersection_matrix_thresholded.py_func(
-        overlapping, non_overlapping, 3, 70
-    )
+    dense = intersection_matrix_thresholded.py_func(overlapping, non_overlapping, 3, 70)
 
     assert get_diagonal_span_from_sets(
         overlapping, non_overlapping, 500, 3, 70, 2
@@ -347,9 +341,11 @@ def test_adjacent_bridge_finds_candidate_to_unknown_region():
     previous = [matching.copy() for _ in range(12)] + [
         different.copy() for _ in range(18)
     ]
-    current = [different.copy() for _ in range(15)] + [
-        matching.copy() for _ in range(12)
-    ] + [different.copy() for _ in range(3)]
+    current = (
+        [different.copy() for _ in range(15)]
+        + [matching.copy() for _ in range(12)]
+        + [different.copy() for _ in range(3)]
+    )
 
     bridge = detect_adjacent_band_bridge(
         previous,
@@ -518,13 +514,16 @@ def test_distal_link_component_fallback_rejects_sparse_noise():
     matrix[1, 8] = matrix[8, 1] = True
     matrix[3, 10] = matrix[10, 3] = True
 
-    assert detect_distal_links(
-        matrix,
-        np.arange(12, dtype=np.int64) * 1000,
-        (),
-        1000,
-        min_windows=3,
-    ) == []
+    assert (
+        detect_distal_links(
+            matrix,
+            np.arange(12, dtype=np.int64) * 1000,
+            (),
+            1000,
+            min_windows=3,
+        )
+        == []
+    )
 
 
 def test_candidate_to_all_scan_finds_one_known_one_unknown_block():
@@ -579,13 +578,16 @@ def test_fragmented_edges_do_not_change_distal_prediction():
         matrix[row, column] = True
         matrix[(row + 1) % 5, column] = True
 
-    assert detect_candidate_to_all_links_from_matrix(
-        matrix,
-        np.arange(5, dtype=np.int64) * 2000,
-        np.arange(40, dtype=np.int64) * 2000,
-        ((0, 9000),),
-        2000,
-    ) == []
+    assert (
+        detect_candidate_to_all_links_from_matrix(
+            matrix,
+            np.arange(5, dtype=np.int64) * 2000,
+            np.arange(40, dtype=np.int64) * 2000,
+            ((0, 9000),),
+            2000,
+        )
+        == []
+    )
 
 
 def test_known_candidate_pair_accepts_one_short_high_confidence_axis():
@@ -610,13 +612,16 @@ def test_candidate_to_all_scan_rejects_short_target_runs():
     matrix = np.zeros((12, 30), dtype=np.bool_)
     matrix[:, 20:25] = True
 
-    assert detect_candidate_to_all_links_from_matrix(
-        matrix,
-        np.arange(12, dtype=np.int64) * 1000,
-        np.arange(30, dtype=np.int64) * 1000,
-        ((0, 12_000),),
-        1000,
-    ) == []
+    assert (
+        detect_candidate_to_all_links_from_matrix(
+            matrix,
+            np.arange(12, dtype=np.int64) * 1000,
+            np.arange(30, dtype=np.int64) * 1000,
+            ((0, 12_000),),
+            1000,
+        )
+        == []
+    )
 
 
 def test_candidate_link_filter_removes_links_from_rejected_arrays():
@@ -631,9 +636,7 @@ def test_candidate_link_filter_removes_links_from_rejected_arrays():
         min_windows=3,
     )
 
-    assert filter_candidate_distal_links(
-        [link], [(1000, 5000, 10)]
-    ) == []
+    assert filter_candidate_distal_links([link], [(1000, 5000, 10)]) == []
     assert filter_candidate_distal_links(
         [link], [(1000, 5000, 10), (8000, 12_000, 10)]
     ) == [link]
@@ -641,13 +644,14 @@ def test_candidate_link_filter_removes_links_from_rejected_arrays():
     self_component = DistalSatelliteLink(
         1000, 4000, 5000, 7000, "component", 0.5, 1.0, 1.0, 8
     )
-    assert filter_candidate_distal_links(
-        [self_component], [(1000, 5000, 10)], proximity=1000
-    ) == []
-
-    snapped = snap_distal_links_to_candidates(
-        [link], [(900, 5100), (7900, 12_100)]
+    assert (
+        filter_candidate_distal_links(
+            [self_component], [(1000, 5000, 10)], proximity=1000
+        )
+        == []
     )
+
+    snapped = snap_distal_links_to_candidates([link], [(900, 5100), (7900, 12_100)])
     assert (snapped[0].start1, snapped[0].end1) == (900, 5100)
     assert (snapped[0].start2, snapped[0].end2) == (7900, 12_100)
 
@@ -656,9 +660,15 @@ def test_intersection_matrix_inverted_merges_two_blocks():
     a = np.array([[100.0, 80.0], [80.0, 100.0]])
     b = np.array([[100.0, 75.0], [75.0, 100.0]])
     overlapping_a = [np.array([1, 2], dtype=np.int32), np.array([2, 3], dtype=np.int32)]
-    non_overlapping_a = [np.array([1, 2], dtype=np.int32), np.array([2, 3], dtype=np.int32)]
+    non_overlapping_a = [
+        np.array([1, 2], dtype=np.int32),
+        np.array([2, 3], dtype=np.int32),
+    ]
     overlapping_b = [np.array([2, 4], dtype=np.int32), np.array([3, 4], dtype=np.int32)]
-    non_overlapping_b = [np.array([2, 4], dtype=np.int32), np.array([3, 4], dtype=np.int32)]
+    non_overlapping_b = [
+        np.array([2, 4], dtype=np.int32),
+        np.array([3, 4], dtype=np.int32),
+    ]
 
     merged = intersection_matrix_inverted.py_func(
         a,

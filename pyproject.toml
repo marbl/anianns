@@ -18,7 +18,6 @@ classifiers = [
 ]
 dependencies = [
     "alive-progress>=3.3,<4",
-    "pyGenomeTracks",
     "pysam",
     "setproctitle",
     "numpy",
@@ -26,11 +25,12 @@ dependencies = [
     "mmh3",
     "numba",
     "matplotlib",
+    "scipy",
     "seaborn",
 ]
 [project.optional-dependencies]
 moddotplot = ["moddotplot"]
-dev = ["black", "coverage", "jupyter", "ipykernel", "pytest", "pytest-cov", "biopython", "seaborn"]
+dev = ["black", "pytest", "pytest-cov"]
 [project.scripts]
 anianns = "anianns.__main__:main"
 anianns_kmer_db = "anianns.build_kmer_db:main"

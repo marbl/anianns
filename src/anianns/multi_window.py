@@ -2,9 +2,7 @@
 
 from __future__ import annotations
 
-import csv
 from dataclasses import dataclass
-from pathlib import Path
 from typing import Iterable, Sequence
 
 
@@ -83,9 +81,9 @@ def candidates_compete(first: WindowCandidate, second: WindowCandidate) -> bool:
     # Preserve the historical behavior within one resolution. Arbitration is
     # only intended to reconcile alternate calls introduced by multi-window
     # mode; same-window band pieces are handled by boundary refinement.
-    if (
-        first.window == second.window
-        and "periodic_diagonal" not in (first.source, second.source)
+    if first.window == second.window and "periodic_diagonal" not in (
+        first.source,
+        second.source,
     ):
         return False
     overlap = _overlap(first, second)
@@ -128,40 +126,3 @@ def select_multi_window_candidates(
             continue
         selected.append(candidate)
     return sorted(selected, key=lambda candidate: (candidate.start, candidate.end))
-
-
-def write_window_selection(
-    output_path: str | Path, candidates: Sequence[WindowCandidate]
-) -> Path:
-    """Write an auditable record of the selected source window per candidate."""
-    output_path = Path(output_path)
-    with output_path.open("w", newline="") as handle:
-        writer = csv.writer(handle, delimiter="\t")
-        writer.writerow(
-            (
-                "start",
-                "end",
-                "length_bp",
-                "selected_window_bp",
-                "support_count",
-                "support_bp",
-                "support_density",
-                "selection_score",
-                "source",
-            )
-        )
-        for candidate in candidates:
-            writer.writerow(
-                (
-                    candidate.start,
-                    candidate.end,
-                    candidate.length,
-                    candidate.window,
-                    candidate.count,
-                    candidate.support_bp,
-                    f"{candidate.density:.6f}",
-                    f"{candidate.selection_score:.3f}",
-                    candidate.source,
-                )
-            )
-    return output_path

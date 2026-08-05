@@ -1,5 +1,6 @@
 import polars as pl
 import numpy as np
+import pytest
 
 from anianns import refine_boundaries as refine
 
@@ -216,14 +217,17 @@ def test_precise_boundaries_accepts_k6_when_user_k_rejects(monkeypatch, capsys):
     )
 
 
-def test_precise_boundaries_uses_k6_instead_of_zero_user_k_result(monkeypatch):
+@pytest.mark.parametrize("invalid_monomer", [0, 1, 2])
+def test_precise_boundaries_uses_k6_instead_of_subminimum_user_k_result(
+    monkeypatch, invalid_monomer
+):
     k6_result = (68, False, None, [])
     monkeypatch.setattr(refine, "extract_region", lambda **kwargs: "ACTG" * 100)
     monkeypatch.setattr(
         refine,
         "ntr_prism",
         lambda _sequence, _size, kmer, **_kwargs: (
-            k6_result if kmer == 6 else (0, False, None, [])
+            k6_result if kmer == 6 else (invalid_monomer, False, None, [])
         ),
     )
     monkeypatch.setattr(refine, "detect_left_boundary", lambda **kwargs: 90)
@@ -433,11 +437,18 @@ def test_report_borders_drops_candidate_when_refinement_raises(monkeypatch):
     assert result == ([], [], [], [], [], [])
 
 
-def test_report_borders_drops_result_with_zero_ntr_monomer(monkeypatch):
+@pytest.mark.parametrize("invalid_monomer", [0, 1, 2])
+def test_report_borders_drops_result_with_subminimum_ntr_monomer(
+    monkeypatch, invalid_monomer
+):
     monkeypatch.setattr(
         refine,
         "detect_precise_boundaries",
-        lambda **kwargs: (*kwargs["coordinates"], None, (0, False, None, [])),
+        lambda **kwargs: (
+            *kwargs["coordinates"],
+            None,
+            (invalid_monomer, False, None, []),
+        ),
     )
     df = pl.DataFrame({"start": [100], "end": [500]})
 
@@ -491,17 +502,13 @@ def test_report_borders_does_not_merge_unrelated_band_edge_candidates(monkeypatc
     assert calls == [(1_900_001, 2_000_001), (2_500_001, 2_600_001)]
 
 
-def test_report_borders_labels_and_separates_verbose_candidates(
-    monkeypatch, capsys
-):
+def test_report_borders_labels_and_separates_verbose_candidates(monkeypatch, capsys):
     monkeypatch.setattr(
         refine,
         "detect_precise_boundaries",
         lambda **kwargs: (*kwargs["coordinates"], None, PRISM_RESULT),
     )
-    df = pl.DataFrame(
-        {"start": [100, 10_000], "end": [500, 20_000]}
-    )
+    df = pl.DataFrame({"start": [100, 10_000], "end": [500, 20_000]})
 
     refine.report_borders(
         fa="input.fa",
@@ -520,13 +527,8 @@ def test_report_borders_labels_and_separates_verbose_candidates(
     output = capsys.readouterr().out
     separator = "=" * refine.BOUNDARY_GRAPH_MAX_WIDTH
     assert output.count(separator) == 2
-    assert (
-        "Analyzing candidate: left boundary=101, right boundary=501" in output
-    )
-    assert (
-        "Analyzing candidate: left boundary=10001, right boundary=20001"
-        in output
-    )
+    assert "Analyzing candidate: left boundary=101, right boundary=501" in output
+    assert "Analyzing candidate: left boundary=10001, right boundary=20001" in output
 
 
 def test_report_borders_merges_candidates_that_share_the_same_band_edge(monkeypatch):
@@ -627,9 +629,7 @@ def test_report_borders_uses_finer_window_when_merging_band_pieces(monkeypatch):
         return (*kwargs["coordinates"], None, PRISM_RESULT)
 
     monkeypatch.setattr(refine, "detect_precise_boundaries", fake_detect)
-    df = pl.DataFrame(
-        {"start": [1_900_000, 2_000_000], "end": [2_000_000, 2_100_000]}
-    )
+    df = pl.DataFrame({"start": [1_900_000, 2_000_000], "end": [2_000_000, 2_100_000]})
 
     refine.report_borders(
         fa="input.fa",
@@ -700,7 +700,9 @@ def test_ntr_prism_ignores_harmonics_without_a_matching_peak(monkeypatch):
         refine, "forward_kmer_hashes", lambda *args, **kwargs: np.array([1, 2])
     )
     monkeypatch.setattr(refine, "calculate_hash_distances", lambda values: [10])
-    monkeypatch.setattr(refine, "top_n_frequent_distances", lambda values, n: [(10, 50)])
+    monkeypatch.setattr(
+        refine, "top_n_frequent_distances", lambda values, n: [(10, 50)]
+    )
     monkeypatch.setattr(refine, "merge_close_values", lambda values, n: [(10, 50)])
     monkeypatch.setattr(
         refine, "hor_test_local_enrichment", lambda *args, **kwargs: (True, [3])
@@ -720,7 +722,9 @@ def test_annotation_ntr_prism_uses_k21_by_default(monkeypatch):
 
     monkeypatch.setattr(refine, "forward_kmer_hashes", capture_hashes)
     monkeypatch.setattr(refine, "calculate_hash_distances", lambda values: [10])
-    monkeypatch.setattr(refine, "top_n_frequent_distances", lambda values, n: [(10, 50)])
+    monkeypatch.setattr(
+        refine, "top_n_frequent_distances", lambda values, n: [(10, 50)]
+    )
     monkeypatch.setattr(refine, "merge_close_values", lambda values, n: [(10, 50)])
     monkeypatch.setattr(
         refine, "hor_test_local_enrichment", lambda *args, **kwargs: False
@@ -752,6 +756,49 @@ def test_ntr_prism_uses_dominant_peak_when_shortest_is_not_its_harmonic(
     result = refine.ntr_prism("ACTG" * 60_000, 240_000, 21)
 
     assert result == (2241, False, None, [])
+
+
+def test_ntr_prism_excludes_short_spacings_from_base_unit_selection(monkeypatch):
+    """One- and two-base artifacts must not override a real repeat period."""
+    monkeypatch.setattr(
+        refine, "forward_kmer_hashes", lambda *args, **kwargs: np.array([1, 2])
+    )
+    monkeypatch.setattr(refine, "calculate_hash_distances", lambda values: [1, 2, 28])
+    monkeypatch.setattr(
+        refine,
+        "top_n_frequent_distances",
+        lambda values, n: [(28, 20_000), (1, 5_000), (2, 4_000)],
+    )
+    monkeypatch.setattr(refine, "merge_close_values", lambda values, n: values)
+    monkeypatch.setattr(
+        refine, "hor_test_local_enrichment", lambda *args, **kwargs: False
+    )
+
+    result = refine.ntr_prism("ACTG" * 10_000, 40_000, 6)
+
+    assert result == (28, False, None, [])
+
+
+@pytest.mark.parametrize("invalid_monomer", [0, 1, 2])
+def test_ntr_prism_rejects_when_only_subminimum_base_units_exist(
+    monkeypatch, invalid_monomer
+):
+    monkeypatch.setattr(
+        refine, "forward_kmer_hashes", lambda *args, **kwargs: np.array([1, 2])
+    )
+    monkeypatch.setattr(
+        refine, "calculate_hash_distances", lambda values: [invalid_monomer]
+    )
+    monkeypatch.setattr(
+        refine,
+        "top_n_frequent_distances",
+        lambda values, n: [(invalid_monomer, 20_000)],
+    )
+    monkeypatch.setattr(refine, "merge_close_values", lambda values, n: values)
+
+    result = refine.ntr_prism("ACTG" * 10_000, 40_000, 6)
+
+    assert result == (None, False, None)
 
 
 def test_ntr_prism_keeps_shortest_peak_when_dominant_peak_is_its_harmonic(

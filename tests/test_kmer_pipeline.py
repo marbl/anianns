@@ -39,9 +39,7 @@ def test_canonical_kmer_hashes_match_reference_on_randomized_sequences():
                 list(generate_kmers_from_fasta(sequence, kmer, True)),
                 dtype=np.int32,
             )
-            assert np.array_equal(
-                canonical_kmer_hashes(sequence, kmer), expected
-            )
+            assert np.array_equal(canonical_kmer_hashes(sequence, kmer), expected)
 
 
 def test_batch_forward_hashes_match_existing_generator_exactly():
@@ -104,9 +102,7 @@ def _assert_pipeline_matches_full_sequence(fasta_path, sequence, use_process):
         list(generate_kmers_from_fasta(sequence, 4, True)), dtype=np.int32
     )
     bands = list(
-        iter_hashed_fasta_bands(
-            str(fasta_path), "chr1", plan, use_process=use_process
-        )
+        iter_hashed_fasta_bands(str(fasta_path), "chr1", plan, use_process=use_process)
     )
 
     assert [band.index for band in bands] == list(range(plan.band_count))
@@ -144,9 +140,7 @@ def test_process_band_pipeline_matches_full_sequence_hashes(tmp_path):
     _assert_pipeline_matches_full_sequence(fasta_path, sequence, use_process=True)
 
 
-def test_disk_hash_cache_is_reused_across_band_and_window_plans(
-    tmp_path, monkeypatch
-):
+def test_disk_hash_cache_is_reused_across_band_and_window_plans(tmp_path, monkeypatch):
     fasta_path, sequence = _indexed_fasta(tmp_path)
     cache_dir = tmp_path / "cache"
     expected = canonical_kmer_hashes(sequence, 4)

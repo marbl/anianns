@@ -15,6 +15,18 @@ from anianns.kmer_utils import calculate_hash_distances
 
 BOUNDARY_GRAPH_MAX_WIDTH = 80
 BOUNDARY_GRAPH_PREFIX_WIDTH = 7
+MIN_NTR_MONOMER_SIZE = 3
+
+
+def has_valid_ntr_monomer(prism_result):
+    """Return whether an NTRPrism result contains an allowed base unit."""
+    if not prism_result:
+        return False
+    monomer = prism_result[0]
+    try:
+        return monomer is not None and monomer >= MIN_NTR_MONOMER_SIZE
+    except TypeError:
+        return False
 
 
 def boundary_graph_columns(
@@ -78,7 +90,7 @@ def format_ntrprism_verbose_value(kmer, prism_result, *, user_selected=False):
     if user_selected:
         label += " (user-selected)"
     monomer = prism_result[0]
-    if monomer in (None, 0):
+    if not has_valid_ntr_monomer(prism_result):
         return f"{label}: rejected"
     summary = f"{label}: monomer={monomer} bp"
     if prism_result[1]:
@@ -285,10 +297,14 @@ def ntr_prism(region, size, kmer=21, verbose=False):
             print("Size must be > 0 to compute percentages.")
         return None, False, None
 
-    grouped = list(grouped_dists_low)
+    grouped = [
+        (distance, count)
+        for distance, count in grouped_dists_low
+        if distance is not None and distance >= MIN_NTR_MONOMER_SIZE
+    ]
     if not grouped:
         if verbose:
-            print("No grouped distances found.")
+            print("No grouped distances at or above the 3 bp minimum monomer size.")
         return None, False, None
 
     top_total_count = sum(count for (_, count) in grouped)
@@ -329,18 +345,14 @@ def ntr_prism(region, size, kmer=21, verbose=False):
     # Decide monomer_size
     monomer_size = lowest_dist  # sensible default
 
-    if lowest_dist is None or lowest_dist == 0:
-        if verbose:
-            print("Lowest distance is 0/None; cannot check harmonics safely.")
-        monomer_size = most_populous_dist  # fallback to most populous
-    elif lowest_dist != most_populous_dist:
+    if lowest_dist != most_populous_dist:
         ratio = most_populous_dist / lowest_dist
         n = round(ratio)
 
         rel_tol = 0.02  # 2% tolerance
 
         # NOTE: compare absolute error in ratio space
-        is_harmonic = (n >= 1) and (abs(ratio - n) <= rel_tol)
+        is_harmonic = (n >= 2) and (abs(ratio - n) <= rel_tol)
 
         if is_harmonic:
             if verbose:
@@ -451,13 +463,11 @@ def detect_precise_boundaries(
         user_prism_res if int(k) == 6 else ntr_prism(core_seq, core_seq_size, 6)
     )
     prism_res = (
-        user_prism_res
-        if user_prism_res[0] not in (None, 0)
-        else k6_prism_res
+        user_prism_res if has_valid_ntr_monomer(user_prism_res) else k6_prism_res
     )
     # Matrix and distal evidence can nominate candidates, but cannot replace
     # direct repeat-period evidence for the candidate itself.
-    if prism_res[0] in (None, 0):
+    if not has_valid_ntr_monomer(prism_res):
         if verbose:
             evidence = "strong" if strong_matrix_evidence else "weak"
             rejected_k = "k=6" if int(k) == 6 else f"k={k} and k=6"
@@ -553,23 +563,16 @@ def detect_precise_boundaries(
 
     if verbose:
         evidence = "strong" if strong_matrix_evidence else "weak"
-        classification_summary = (
-            f" (classification={best_match})" if classify else ""
-        )
+        classification_summary = f" (classification={best_match})" if classify else ""
         print(
             f"Accepted candidate {candidate_start}-{candidate_end}"
             f"{classification_summary}:"
         )
         print(f"    {evidence.capitalize()} matrix support")
+        print("    " + format_ntrprism_verbose_value(6, k6_prism_res))
         print(
             "    "
-            + format_ntrprism_verbose_value(6, k6_prism_res)
-        )
-        print(
-            "    "
-            + format_ntrprism_verbose_value(
-                k, user_prism_res, user_selected=True
-            )
+            + format_ntrprism_verbose_value(k, user_prism_res, user_selected=True)
         )
         print(f"    Estimated left boundary: {left_boundary}")
         print(f"    Estimated right boundary: {right_boundary}")
@@ -1127,7 +1130,7 @@ def report_borders(
         start = int(start)
         end = int(end)
         monomer_value = prism_result[0]
-        if monomer_value in (None, 0):
+        if not has_valid_ntr_monomer(prism_result):
             raise ValueError("Boundary result has no valid NTRPrism monomer")
         periodicity_value = prism_result[2]
         hor_value = bool(prism_result[1])
@@ -1156,12 +1159,9 @@ def report_borders(
             tolerance=max(refinement_window, refinement_windows[next_i]) * 3,
         ):
             coordinates = (coordinates[0], int(ends[next_i]) + 1)
-            refinement_window = min(
-                refinement_window, refinement_windows[next_i]
-            )
+            refinement_window = min(refinement_window, refinement_windows[next_i])
             candidate_has_strong_matrix_evidence = (
-                candidate_has_strong_matrix_evidence
-                or strong_matrix_evidence[next_i]
+                candidate_has_strong_matrix_evidence or strong_matrix_evidence[next_i]
             )
             del starts[next_i]
             del ends[next_i]

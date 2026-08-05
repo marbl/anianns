@@ -97,9 +97,7 @@ def _build_kmer_sets(values, selected, max_len, window, interval):
     return overlap_sets, non_sets
 
 
-def build_kmer_sets(
-    kmer_list, max_len, window, interval, prepend=None, sketch=4
-):
+def build_kmer_sets(kmer_list, max_len, window, interval, prepend=None, sketch=4):
     """Build sorted window sketches after computing the modulo mask once."""
     if sketch not in (2, 4):
         raise ValueError("sketch must be either 2 or 4")
@@ -115,9 +113,9 @@ def build_kmer_sets(
         prepend_values = prepend_values[
             (prepend_values != 0) & (prepend_values % sketch == 0)
         ]
-        non_sets[0] = np.unique(
-            np.concatenate((prepend_values, non_sets[0]))
-        ).astype(np.int32, copy=False)
+        non_sets[0] = np.unique(np.concatenate((prepend_values, non_sets[0]))).astype(
+            np.int32, copy=False
+        )
 
     return overlap_sets, non_sets
 

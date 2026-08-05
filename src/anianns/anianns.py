@@ -68,7 +68,6 @@ from anianns.multi_window import (
     candidate_passes_support,
     derive_window_sizes,
     select_multi_window_candidates,
-    write_window_selection,
 )
 
 from anianns.parse_matrix import (
@@ -468,8 +467,13 @@ def merge_periodic_lag_candidates(candidates, window):
             continue
         previous = merged[-1]
         period_difference = abs(previous.period_bp - candidate.period_bp)
-        period_tolerance = max(window, int(0.10 * min(previous.period_bp, candidate.period_bp)))
-        if candidate.start <= previous.end + (2 * window) and period_difference <= period_tolerance:
+        period_tolerance = max(
+            window, int(0.10 * min(previous.period_bp, candidate.period_bp))
+        )
+        if (
+            candidate.start <= previous.end + (2 * window)
+            and period_difference <= period_tolerance
+        ):
             total_length = (previous.end - previous.start) + (
                 candidate.end - candidate.start
             )
@@ -642,8 +646,7 @@ def save_matrix_heatmap(
     plot_matrix(
         display_matrix,
         title=(
-            f"{seq_id} matrix {matrix_index}: "
-            f"{genomic_start:,}-{genomic_end:,} bp"
+            f"{seq_id} matrix {matrix_index}: " f"{genomic_start:,}-{genomic_end:,} bp"
         ),
         show_colorbar=False,
         dpi=100,
@@ -670,8 +673,7 @@ def save_matrix_heatmap(
     plot_matrix(
         identity_display,
         title=(
-            f"{seq_id} matrix {matrix_index}: "
-            f"{genomic_start:,}-{genomic_end:,} bp"
+            f"{seq_id} matrix {matrix_index}: " f"{genomic_start:,}-{genomic_end:,} bp"
         ),
         cmap="spectral_11_r",
         show_colorbar=True,
@@ -858,9 +860,7 @@ def detect_and_save_matrix_heatmap(
     candidates,
 ):
     """Detect local distal blocks and overlay them on a saved heatmap."""
-    links = detect_matrix_distal_links(
-        matrix, genomic_start, window, candidates
-    )
+    links = detect_matrix_distal_links(matrix, genomic_start, window, candidates)
     plot_path = save_matrix_heatmap(
         matrix,
         output_directory,
@@ -949,7 +949,7 @@ def downsample_numeric_matrix(matrix, max_pixels=1024):
 
 
 def write_distal_links(links, seq_id, output_path, coordinate_offset=0):
-    """Write detected distal relationships as BEDPE plus support metrics."""
+    """Write detected distal relationships as ten-column BEDPE records."""
     with open(output_path, "w", newline="") as handle:
         writer = csv.writer(handle, delimiter="\t")
         writer.writerow(
@@ -964,11 +964,6 @@ def write_distal_links(links, seq_id, output_path, coordinate_offset=0):
                 "score",
                 "strand1",
                 "strand2",
-                "source",
-                "density",
-                "row_coverage",
-                "column_coverage",
-                "hit_count",
             )
         )
         for index, link in enumerate(links, start=1):
@@ -984,13 +979,31 @@ def write_distal_links(links, seq_id, output_path, coordinate_offset=0):
                     min(1000, round(link.density * 1000)),
                     ".",
                     ".",
-                    link.source,
-                    f"{link.density:.6f}",
-                    f"{link.row_coverage:.6f}",
-                    f"{link.column_coverage:.6f}",
-                    link.hit_count,
                 )
             )
+
+
+def write_distal_summary(links, seq_id, output_path, coordinate_offset=0):
+    """Write detailed support metrics for accepted distal satellite pairs."""
+    with open(output_path, "w") as handle:
+        handle.write(f"Accepted distal satellite pairs for {seq_id}\n")
+        handle.write(f"Count: {len(links)}\n")
+        for index, link in enumerate(links, start=1):
+            score = min(1000, round(link.density * 1000))
+            handle.write(f"\nAccepted satellite pair {index}\n")
+            handle.write(
+                f"  Satellite 1: {seq_id}:{link.start1 + coordinate_offset}-"
+                f"{link.end1 + coordinate_offset}\n"
+            )
+            handle.write(
+                f"  Satellite 2: {seq_id}:{link.start2 + coordinate_offset}-"
+                f"{link.end2 + coordinate_offset}\n"
+            )
+            handle.write(f"  Score: {score}\n")
+            handle.write(f"  Density: {link.density:.6f}\n")
+            handle.write(f"  Row coverage: {link.row_coverage:.6f}\n")
+            handle.write(f"  Column coverage: {link.column_coverage:.6f}\n")
+            handle.write(f"  Hit count: {link.hit_count}\n")
 
 
 def promote_unmatched_distal_candidates(
@@ -1113,7 +1126,11 @@ def promote_unmatched_distal_candidates(
         first, second = intervals
         if first[0] > second[0]:
             first, second = second, first
-        if match(first) is None or match(second) is None or match(first) == match(second):
+        if (
+            match(first) is None
+            or match(second) is None
+            or match(first) == match(second)
+        ):
             continue
         validated_links.append(
             DistalSatelliteLink(
@@ -1472,9 +1489,7 @@ def get_parser():
         "-d",
         "--directory",
         default=None,
-        help=(
-            "Output directory used with --save. Default: current directory."
-        ),
+        help=("Output directory used with --save. Default: current directory."),
     )
     ntrprism_parser.add_argument(
         "-k",
@@ -1840,10 +1855,11 @@ def _run_command(args):
                     kmers_list = band_plan.hashes_for_window(first_band, win)
                     first_band_sketches = None
                     if additional_windows:
-                        first_band_sketches, sketch_runtime = (
-                            build_band_window_sketches(
-                                first_band, band_plan, windows, sketch=args.sketch
-                            )
+                        (
+                            first_band_sketches,
+                            sketch_runtime,
+                        ) = build_band_window_sketches(
+                            first_band, band_plan, windows, sketch=args.sketch
                         )
                         prev_ov, prev_nov = first_band_sketches[win]
                         stage_times["sketch"] += sketch_runtime
@@ -1852,9 +1868,7 @@ def _run_command(args):
                         prev_ov, prev_nov = build_sets(
                             kmers_list, max_len, win, interval, sketch=args.sketch
                         )
-                        stage_times["sketch"] += (
-                            time.perf_counter() - sketch_started
-                        )
+                        stage_times["sketch"] += time.perf_counter() - sketch_started
                     matrix_started = time.perf_counter()
                     if args.plot:
                         (
@@ -1869,9 +1883,7 @@ def _run_command(args):
                         initial_matrix = initial_identity_matrix >= args.identity
                     elif args.distal:
                         initial_identity_matrix = None
-                        initial_matrix = imat(
-                            prev_ov, prev_nov, k_param, args.identity
-                        )
+                        initial_matrix = imat(prev_ov, prev_nov, k_param, args.identity)
                         scan_threshold_matrix = initial_matrix
                     else:
                         initial_identity_matrix = None
@@ -1912,9 +1924,7 @@ def _run_command(args):
                         sketch=args.sketch,
                         prebuilt_sketches=first_band_sketches,
                     )
-                    additional_window_candidates.extend(
-                        first_additional_candidates
-                    )
+                    additional_window_candidates.extend(first_additional_candidates)
                     stage_times["sketch"] += additional_sketch_runtime
                     stage_times["scan"] += additional_scan_runtime
 
@@ -1993,13 +2003,14 @@ def _run_command(args):
 
                             band_sketches = None
                             if additional_windows:
-                                band_sketches, sketch_runtime = (
-                                    build_band_window_sketches(
-                                        hashed_band,
-                                        band_plan,
-                                        windows,
-                                        sketch=args.sketch,
-                                    )
+                                (
+                                    band_sketches,
+                                    sketch_runtime,
+                                ) = build_band_window_sketches(
+                                    hashed_band,
+                                    band_plan,
+                                    windows,
+                                    sketch=args.sketch,
                                 )
                                 ov, nov = band_sketches[win]
                                 stage_times["sketch"] += sketch_runtime
@@ -2032,9 +2043,7 @@ def _run_command(args):
                                 )
                             elif args.distal:
                                 updated_identity_matrix = None
-                                updated_matrix = imat(
-                                    ov, nov, k_param, args.identity
-                                )
+                                updated_matrix = imat(ov, nov, k_param, args.identity)
                                 scan_threshold_matrix = updated_matrix
                             else:
                                 updated_identity_matrix = None
@@ -2339,45 +2348,9 @@ def _run_command(args):
                             "candidates"
                         )
                     satellite_coordinate_list = filtered
-                    if len(windows) > 1:
-                        os.makedirs(directory, exist_ok=True)
-                        audit_candidates = selected_window_candidates
-                        if seq_bounds:
-                            coordinate_offset = int(seq_bounds[1])
-                            audit_candidates = [
-                                WindowCandidate(
-                                    candidate.start + coordinate_offset,
-                                    candidate.end + coordinate_offset,
-                                    candidate.count,
-                                    candidate.window,
-                                    candidate.source,
-                                )
-                                for candidate in selected_window_candidates
-                            ]
-                        selection_path = write_window_selection(
-                            os.path.join(directory, f"{seq_id}_window_selection.tsv"),
-                            audit_candidates,
-                        )
-                        if verbosity:
-                            print(f"Saved multi-window selections to {selection_path}")
                     if distal_accumulator is not None:
                         neighborhood = distal_accumulator.build(
                             satellite_coordinate_list
-                        )
-                        os.makedirs(directory, exist_ok=True)
-                        neighborhood_path = os.path.join(
-                            directory, f"{seq_id}_distal_neighborhood.npz"
-                        )
-                        np.savez_compressed(
-                            neighborhood_path,
-                            matrix=neighborhood.matrix,
-                            genomic_window_starts=neighborhood.genomic_window_starts,
-                            candidate_ranges=np.asarray(
-                                neighborhood.candidate_ranges, dtype=np.int64
-                            ).reshape(-1, 2),
-                            window=np.int64(win),
-                            halo_windows=np.int64(2),
-                            identity=np.int64(args.identity),
                         )
                         distal_link_list.extend(
                             detect_distal_links(
@@ -2387,11 +2360,6 @@ def _run_command(args):
                                 win,
                             )
                         )
-                        if verbosity:
-                            print(
-                                f"Saved {neighborhood.matrix.shape[0]}-window distal "
-                                f"neighborhood matrix to {neighborhood_path}"
-                            )
                     if args.distal:
                         distal_link_list = filter_candidate_distal_links(
                             distal_link_list,
@@ -2624,14 +2592,22 @@ def _run_command(args):
                             distal_links_path,
                             coordinate_offset=coordinate_offset,
                         )
+                        if args.log:
+                            distal_summary_path = os.path.join(
+                                directory, f"{seq_id}_distal_summary.txt"
+                            )
+                            write_distal_summary(
+                                distal_link_list,
+                                seq_id,
+                                distal_summary_path,
+                                coordinate_offset=coordinate_offset,
+                            )
                         if not args.quiet:
                             print(
                                 f"Saved {len(distal_link_list)} distal satellite "
                                 f"link(s) to {distal_links_path}"
                             )
-                    output_starts = [
-                        start + coordinate_offset for start in new_starts
-                    ]
+                    output_starts = [start + coordinate_offset for start in new_starts]
                     output_ends = [end + coordinate_offset for end in new_ends]
                     item_rgb = satellite_dsu.item_rgb_for_annotations(
                         seq_id,
@@ -2693,9 +2669,7 @@ def _run_command(args):
                     if verbosity:
                         total_runtime = time.perf_counter() - sequence_started
                         print(f"Stage timings for {seq_id}:")
-                        print(
-                            f"  hash/cache wait:    {stage_times['hash_wait']:.3f} s"
-                        )
+                        print(f"  hash/cache wait:    {stage_times['hash_wait']:.3f} s")
                         print(f"  sketch construction:{stage_times['sketch']:9.3f} s")
                         print(f"  diagonal scan:      {stage_times['scan']:9.3f} s")
                         print(
@@ -2712,16 +2686,18 @@ def _run_command(args):
                         f"{annotation_path}\n"
                     )
 
-            satellite_dsu_path = os.path.join(directory, "satellite_dsu.tsv")
-            satellite_dsu_text_path = os.path.join(directory, "satellite_dsu.txt")
-            os.makedirs(directory, exist_ok=True)
-            satellite_dsu.write_tsv(satellite_dsu_path)
-            satellite_dsu.write_text(satellite_dsu_text_path)
-            if not args.quiet:
-                print(
-                    f"Saved {len(satellite_dsu.satellites)} satellite DSU member(s) "
-                    f"to {satellite_dsu_path} and {satellite_dsu_text_path}"
-                )
+            if args.distal:
+                satellite_dsu_path = os.path.join(directory, "satellite_dsu.tsv")
+                satellite_dsu_text_path = os.path.join(directory, "satellite_dsu.txt")
+                os.makedirs(directory, exist_ok=True)
+                satellite_dsu.write_tsv(satellite_dsu_path)
+                satellite_dsu.write_text(satellite_dsu_text_path)
+                if not args.quiet:
+                    print(
+                        f"Saved {len(satellite_dsu.satellites)} satellite DSU "
+                        f"member(s) to {satellite_dsu_path} and "
+                        f"{satellite_dsu_text_path}"
+                    )
 
         except Exception as e:
             print(e)

@@ -142,7 +142,9 @@ def test_extract_region_returns_sequence_and_handles_errors(monkeypatch, capsys)
         def close(self):
             return None
 
-    monkeypatch.setattr("anianns.general_utils.pysam.FastaFile", lambda path: FakeFasta())
+    monkeypatch.setattr(
+        "anianns.general_utils.pysam.FastaFile", lambda path: FakeFasta()
+    )
     assert extract_region("fake.fa", "chr1", 0, 10) == "chr1:1-10"
 
     def raise_error(path):
@@ -193,7 +195,9 @@ def test_extract_regions_and_histograms_by_name(monkeypatch):
         "anianns.general_utils.generate_kmers_from_fasta_forward_only",
         lambda seq, k, quiet: iter([9, 1, 9, 1, 9]),
     )
-    monkeypatch.setattr("anianns.general_utils.top_n_frequent_distances", lambda values, n: [(2, 3)])
+    monkeypatch.setattr(
+        "anianns.general_utils.top_n_frequent_distances", lambda values, n: [(2, 3)]
+    )
 
     regions = extract_regions_by_name(df, ["one.fa", "two.fa"], k=4, verbose=False)
     histograms = extract_histograms_by_name(df, "one.fa", k=4, verbose=False)
@@ -293,10 +297,7 @@ def test_plot_matrix_can_place_overlay_legend_outside_axes(monkeypatch, tmp_path
 def test_read_bed_files_skips_headers_and_casts_coordinates(tmp_path):
     bed_path = tmp_path / "example.bed"
     bed_path.write_text(
-        "track name=test\n"
-        "# ignored\n"
-        "chr1\t10\t20\talpha\n"
-        "chr2\t30\t40\tbeta\n"
+        "track name=test\n" "# ignored\n" "chr1\t10\t20\talpha\n" "chr2\t30\t40\tbeta\n"
     )
 
     [df] = read_bed_files(str(bed_path))

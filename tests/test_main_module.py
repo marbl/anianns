@@ -6,7 +6,9 @@ from pathlib import Path
 
 def test_main_module_sets_process_title_and_exits(monkeypatch):
     calls = {}
-    module_path = Path(__file__).resolve().parents[1] / "src" / "anianns" / "__main__.py"
+    module_path = (
+        Path(__file__).resolve().parents[1] / "src" / "anianns" / "__main__.py"
+    )
 
     monkeypatch.setitem(
         sys.modules,
@@ -16,9 +18,13 @@ def test_main_module_sets_process_title_and_exits(monkeypatch):
     monkeypatch.setitem(
         sys.modules,
         "setproctitle",
-        types.SimpleNamespace(setproctitle=lambda title: calls.setdefault("title", title)),
+        types.SimpleNamespace(
+            setproctitle=lambda title: calls.setdefault("title", title)
+        ),
     )
-    monkeypatch.setattr(sys, "exit", lambda code=0: (_ for _ in ()).throw(SystemExit(code)))
+    monkeypatch.setattr(
+        sys, "exit", lambda code=0: (_ for _ in ()).throw(SystemExit(code))
+    )
 
     try:
         runpy.run_path(str(module_path), run_name="__main__")

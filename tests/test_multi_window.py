@@ -6,7 +6,6 @@ from anianns.multi_window import (
     derive_window_sizes,
     normalize_window_sizes,
     select_multi_window_candidates,
-    write_window_selection,
 )
 
 
@@ -94,14 +93,3 @@ def test_periodic_rescue_reconciles_with_same_window_fragment():
     )
 
     assert selected == [periodic]
-
-
-def test_selection_audit_records_chosen_window(tmp_path):
-    path = write_window_selection(
-        tmp_path / "selection.tsv", [WindowCandidate(100, 4100, 4, 1000)]
-    )
-
-    contents = path.read_text()
-    assert "selected_window_bp" in contents
-    assert "source" in contents
-    assert "100\t4100\t4000\t1000" in contents

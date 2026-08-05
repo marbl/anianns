@@ -50,6 +50,11 @@ def test_periodic_lag_validation_accepts_harmonics_and_rejects_noise():
     assert not supports_periodic_lag("ACGTTGCATCGAGCTAGTCA", 80, kmer=5)
 
 
+@pytest.mark.parametrize("period_bp", [0, 1, 2])
+def test_periodic_lag_validation_rejects_subminimum_base_units(period_bp):
+    assert not supports_periodic_lag("ACGT" * 80, period_bp, kmer=3)
+
+
 def test_analyze_kmer_spacings_defaults_to_k21(monkeypatch):
     observed = {}
 
@@ -142,10 +147,7 @@ def test_main_ntrprism_reports_missing_fasta(monkeypatch, tmp_path, capsys):
         cli.main()
 
     assert exc_info.value.code == 1
-    assert (
-        f"[ERROR] FASTA file does not exist: {missing}"
-        in capsys.readouterr().err
-    )
+    assert f"[ERROR] FASTA file does not exist: {missing}" in capsys.readouterr().err
 
 
 def test_main_ntrprism_reports_missing_sequence(monkeypatch, tmp_path, capsys):

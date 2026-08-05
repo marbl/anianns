@@ -687,13 +687,9 @@ class SatelliteDSU:
         hor_flags,
     ):
         """Color annotations by DSU component and exact NTRPrism signature."""
-        values = list(
-            zip(starts, ends, monomers, periodicities, hor_flags)
-        )
+        values = list(zip(starts, ends, monomers, periodicities, hor_flags))
         color_keys = []
-        for row_number, (start, end, monomer, periodicity, is_hor) in enumerate(
-            values
-        ):
+        for row_number, (start, end, monomer, periodicity, is_hor) in enumerate(values):
             index = self.find_satellite(chrom, start, end)
             if index is None or monomer in (None, 0):
                 # Missing NTRPrism evidence must not cause unrelated calls to

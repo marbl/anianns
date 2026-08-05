@@ -141,6 +141,9 @@ def test_read_sequence_kmers_from_file_uses_fasta_fetch(monkeypatch):
             return "ACTGA"
 
     monkeypatch.setattr("anianns.kmer_utils.pysam.FastaFile", FakeFasta)
-    monkeypatch.setattr("anianns.kmer_utils.generate_kmers_from_fasta", lambda seq, ksize, quiet: [1, 2, 3])
+    monkeypatch.setattr(
+        "anianns.kmer_utils.generate_kmers_from_fasta",
+        lambda seq, ksize, quiet: [1, 2, 3],
+    )
 
     assert read_sequence_kmers_from_file("fake.fa", "chr1", 4, True) == [[1, 2, 3]]

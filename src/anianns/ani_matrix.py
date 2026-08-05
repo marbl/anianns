@@ -55,9 +55,7 @@ def passes_identity(a, a_prime, b, b_prime, minimum_similarity):
         return False
     if intersection_reaches_threshold(a, b_prime, minimum_similarity * len_a):
         return True
-    return intersection_reaches_threshold(
-        a_prime, b, minimum_similarity * len_b
-    )
+    return intersection_reaches_threshold(a_prime, b, minimum_similarity * len_b)
 
 
 @njit(cache=True)
@@ -242,10 +240,7 @@ def intersection_matrix_cross_groups_thresholded(
             for j in range(first_column, column_stop):
                 if group_ids[i] == group_ids[j]:
                     continue
-                if (
-                    skip_adjacent_groups
-                    and abs(group_ids[i] - group_ids[j]) == 1
-                ):
+                if skip_adjacent_groups and abs(group_ids[i] - group_ids[j]) == 1:
                     continue
                 if passes_identity(
                     a,
@@ -341,9 +336,7 @@ def _diagonal_row_bounds(
 
 
 @njit(cache=True, parallel=True)
-def diagonal_span_bounds(
-    overlapping, non_overlapping, k, identity, zero_tolerance
-):
+def diagonal_span_bounds(overlapping, non_overlapping, k, identity, zero_tolerance):
     """Find each diagonal row span without materializing the full matrix."""
     n = len(overlapping)
     starts = np.empty(n, dtype=np.int64)

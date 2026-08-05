@@ -159,21 +159,17 @@ additional resolutions without dense matrices, reconciles overlapping calls,
 and boundary-refines only the winning call at each locus. If the initial
 right-boundary range has no supported transition, refinement searches back to
 the left using k-mers observed at least three times in the candidate core. This
-prevents an unresolved call from defaulting to a matrix-band endpoint. It also
-writes a `<sequence>_window_selection.tsv` audit file recording the chosen
-resolution.
+prevents an unresolved call from defaulting to a matrix-band endpoint.
 Boundary refinement runs NTRPrism at both k=6 and the user-selected k-mer
 length. A candidate passes when either resolution finds sufficient spacing
 support. If both reject, AniAnn's removes the candidate even when its matrix or
-distal signal is strong, so final annotations never use a monomer score of 0 as
-a fallback.
-The audit file's `source` column distinguishes ordinary `diagonal` calls from
-`periodic_diagonal` rescues. Periodic rescues target long arrays whose repeat
-unit produces several regularly spaced lines parallel to the main diagonal
-rather than one solid diagonal block. AniAnn's scans a bounded set of diagonal
-lags without materializing a full matrix, requires at least three high-contrast
-harmonics with consistent row coverage, and independently confirms the inferred
-period with NTRPrism before adding the candidate. Broad dense blocks, isolated
+distal signal is strong, so final annotations never use a monomer score below 3
+bp as a fallback. Periodic rescues target long arrays whose repeat unit produces
+several regularly spaced lines parallel to the main diagonal rather than one
+solid diagonal block. AniAnn's scans a bounded set of diagonal lags without
+materializing a full matrix, requires at least three high-contrast harmonics
+with consistent row coverage, and independently confirms the inferred period
+with NTRPrism before adding the candidate. Broad dense blocks, isolated
 off-diagonal matches, and single parallel lines do not pass this rescue path.
 Comparable spans favor the finer resolution; a coarser call wins when it
 recovers materially more supported array sequence.
@@ -202,16 +198,15 @@ one worker is reserved for streaming k-mer hashes while the remaining workers
 run the matrix kernels. With `--threads 1`, hashing and matrix processing run
 synchronously so the limit is preserved. **Default: all available threads.**
 
-Every annotation run also writes `satellite_dsu.tsv` and a human-readable
-`satellite_dsu.txt`. Each boundary-refined
-satellite is a DSU node, including unlinked singletons. With `--distal`,
-validated distal links
-union their two satellite nodes, so chains of distal relationships share one
-stable `component_id`; the table also reports component size and direct-link
-count. BED `itemRgb` values are shared only by satellites that have both the
-same DSU component and the same retained NTRPrism signature (monomer,
-periodicity, and HOR status). Missing NTRPrism monomers are not grouped by
-color.
+Distal annotation runs also write `satellite_dsu.tsv` and a human-readable
+`satellite_dsu.txt`; non-distal runs do not create either file. Each
+boundary-refined satellite is a DSU node, including unlinked singletons.
+Validated distal links union their two satellite nodes, so chains of distal
+relationships share one stable `component_id`; the table also reports
+component size and direct-link count. BED `itemRgb` values are shared only by
+satellites that have both the same DSU component and the same retained
+NTRPrism signature (monomer, periodicity, and HOR status). Missing NTRPrism
+monomers are not grouped by color.
 
 `--identifier <STR>`
 
@@ -236,11 +231,11 @@ is visualization-only and does not affect satellite or distal-link prediction.
 Detect distal-satellite links independently of whether plots are requested.
 Detected off-diagonal blocks are written to
 `<sequence>_distal_links.bedpe`, and used to link satellites in the DSU. A
-compact cross-band matrix and its genomic coordinates are saved to
-`<sequence>_distal_neighborhood.npz`; two neighboring windows on either side of
-each candidate are retained. An unmatched distal axis must pass NTR
-Prism and boundary refinement before it is added to BED/CSV or linked in the
-DSU. Strong distal support cannot rescue an endpoint rejected at both k values.
+compact candidate-neighborhood matrix retaining two neighboring windows on
+either side of each candidate is used in memory and is not written to disk. An
+unmatched distal axis must pass NTR Prism and boundary refinement before it is
+added to BED/CSV or linked in the DSU. Strong distal support cannot rescue an
+endpoint rejected at both k values.
 Neighboring bands are bridged with bounded candidate-to-all comparisons in both
 directions plus a 50-window seam scan. With both `--distal --plot`, links are
 outlined in red. When the bridge finds evidence, a sparse
@@ -263,7 +258,10 @@ Write the verbose output to a timestamped file in the selected output directory
 while continuing to show it in the terminal. The filename records the local run
 date and time, for example
 `anianns_annotation_log_2026-08-04_14-37-52.txt`. This option implies
-`--verbose` and cannot be combined with `--quiet`.
+`--verbose` and cannot be combined with `--quiet`. A distal run also writes a
+per-sequence `<sequence>_distal_summary.txt` containing the score, density, row
+coverage, column coverage, and hit count for every accepted distal satellite
+pair.
 **Default: disabled.**
 
 `--quiet`

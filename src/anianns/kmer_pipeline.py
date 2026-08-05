@@ -103,7 +103,9 @@ class SequenceBandPlan:
         try:
             window_plan = self.window_plans[window]
         except KeyError as error:
-            raise ValueError(f"window size {window} is not part of this plan") from error
+            raise ValueError(
+                f"window size {window} is not part of this plan"
+            ) from error
 
         available = self.total_kmers - band.start
         required = min(self.band_height + window_plan.interval, available)
@@ -344,9 +346,7 @@ def load_cached_sequence_hashes(
         )
     except OSError:
         return None
-    return _load_cached_hashes(
-        cache_path, max(0, sequence_length - kmer + 1)
-    )
+    return _load_cached_hashes(cache_path, max(0, sequence_length - kmer + 1))
 
 
 def _iter_uncached_hashed_fasta_bands(

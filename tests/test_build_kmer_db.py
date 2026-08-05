@@ -15,7 +15,9 @@ def test_save_and_load_kmer_sets_round_trip(tmp_path):
     assert loaded == original
 
 
-def test_load_kmer_sets_shared_k_returns_empty_result_on_truncated_file(tmp_path, capsys):
+def test_load_kmer_sets_shared_k_returns_empty_result_on_truncated_file(
+    tmp_path, capsys
+):
     path = tmp_path / "broken.db"
     with gzip.open(path, "wb") as handle:
         handle.write(struct.pack("<B", 21))

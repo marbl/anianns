@@ -10,12 +10,8 @@ def test_satellite_dsu_unions_distal_links_transitively():
     third = satellites.add_satellite("chr1", 1000, 1200, name="C")
     singleton = satellites.add_satellite("chr1", 2000, 2200, name="D")
 
-    assert satellites.union_by_coordinates(
-        "chr1", 90, 210, "chr1", 490, 710
-    )
-    assert satellites.union_by_coordinates(
-        "chr1", 500, 700, "chr1", 1000, 1200
-    )
+    assert satellites.union_by_coordinates("chr1", 90, 210, "chr1", 490, 710)
+    assert satellites.union_by_coordinates("chr1", 500, 700, "chr1", 1000, 1200)
 
     assert satellites.dsu.find(first) == satellites.dsu.find(second)
     assert satellites.dsu.find(second) == satellites.dsu.find(third)
@@ -23,9 +19,7 @@ def test_satellite_dsu_unions_distal_links_transitively():
 
     rows = satellites.component_rows()
     linked_rows = rows[:3]
-    assert {row["component_id"] for row in linked_rows} == {
-        "satellite_component_0001"
-    }
+    assert {row["component_id"] for row in linked_rows} == {"satellite_component_0001"}
     assert {row["component_size"] for row in linked_rows} == {3}
     assert [row["direct_link_count"] for row in linked_rows] == [1, 2, 1]
     assert rows[3]["component_size"] == 1
@@ -63,9 +57,7 @@ def test_satellite_dsu_does_not_union_unmatched_distal_endpoint():
     satellites.add_satellite("chr1", 100, 200)
     satellites.add_satellite("chr1", 500, 600)
 
-    assert not satellites.union_by_coordinates(
-        "chr1", 100, 200, "chr1", 800, 900
-    )
+    assert not satellites.union_by_coordinates("chr1", 100, 200, "chr1", 800, 900)
     assert all(row["component_size"] == 1 for row in satellites.component_rows())
 
 

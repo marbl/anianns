@@ -111,9 +111,7 @@ def sobel_edge_mask(matrix, threshold=0.35):
 
 def _range_window_indices(genomic_starts, interval, window):
     start, end = interval
-    return np.flatnonzero(
-        (genomic_starts < end) & ((genomic_starts + window) > start)
-    )
+    return np.flatnonzero((genomic_starts < end) & ((genomic_starts + window) > start))
 
 
 def _ranges_overlap(first, second):
@@ -145,13 +143,9 @@ def deduplicate_distal_links(links, minimum_overlap=0.5):
     kept = []
     for link in ordered:
         duplicate = any(
-            _reciprocal_overlap(
-                link.start1, link.end1, prior.start1, prior.end1
-            )
+            _reciprocal_overlap(link.start1, link.end1, prior.start1, prior.end1)
             >= minimum_overlap
-            and _reciprocal_overlap(
-                link.start2, link.end2, prior.start2, prior.end2
-            )
+            and _reciprocal_overlap(link.start2, link.end2, prior.start2, prior.end2)
             >= minimum_overlap
             for prior in kept
         )
@@ -188,8 +182,7 @@ def filter_candidate_distal_links(
     filtered = []
     for link in links:
         if link.source == "candidate" and not (
-            supported(link.start1, link.end1)
-            and supported(link.start2, link.end2)
+            supported(link.start1, link.end1) and supported(link.start2, link.end2)
         ):
             continue
         if link.source == "component" and (
@@ -287,8 +280,7 @@ def detect_distal_links(
         }
     )
     range_indices = [
-        _range_window_indices(genomic_starts, interval, window)
-        for interval in ranges
+        _range_window_indices(genomic_starts, interval, window) for interval in ranges
     ]
     claimed = np.zeros_like(binary)
     links = []
@@ -348,9 +340,9 @@ def detect_distal_links(
 
     # Close one-window holes without losing components that touch an edge.
     padded = np.pad(residual, 1, mode="constant")
-    joined = ndimage.binary_closing(
-        padded, structure=np.ones((3, 3), dtype=np.bool_)
-    )[1:-1, 1:-1]
+    joined = ndimage.binary_closing(padded, structure=np.ones((3, 3), dtype=np.bool_))[
+        1:-1, 1:-1
+    ]
     joined |= residual
     labels, component_count = ndimage.label(
         joined, structure=np.ones((3, 3), dtype=np.int8)
@@ -375,10 +367,7 @@ def detect_distal_links(
         original = residual[row_start:row_stop, column_start:column_stop]
         supported_rows = np.flatnonzero(np.any(original, axis=1)) + row_start
         supported_columns = np.flatnonzero(np.any(original, axis=0)) + column_start
-        if (
-            len(supported_rows) < min_windows
-            or len(supported_columns) < min_windows
-        ):
+        if len(supported_rows) < min_windows or len(supported_columns) < min_windows:
             continue
         density, row_coverage, column_coverage, hit_count = _block_statistics(
             residual, supported_rows, supported_columns
@@ -544,9 +533,7 @@ def detect_candidate_to_all_links(
     )
 
 
-def detect_candidate_to_all_links_from_full_matrix(
-    matrix, candidates, prefix, window
-):
+def detect_candidate_to_all_links_from_full_matrix(matrix, candidates, prefix, window):
     """Reuse a plot matrix for candidate-to-all scanning without new ANI work."""
     binary = np.asarray(matrix, dtype=np.bool_)
     selected_indices, candidate_ranges = candidate_neighborhood_indices(
@@ -559,9 +546,7 @@ def detect_candidate_to_all_links_from_full_matrix(
     if len(selected_indices) == 0:
         return []
     selected_starts = prefix + (selected_indices * window)
-    all_starts = prefix + (
-        np.arange(binary.shape[0], dtype=np.int64) * window
-    )
+    all_starts = prefix + (np.arange(binary.shape[0], dtype=np.int64) * window)
     return detect_candidate_to_all_links_from_matrix(
         binary[selected_indices],
         selected_starts,
@@ -592,9 +577,11 @@ def _cross_candidate_to_all_links(
     )
     column_indices = np.arange(len(column_overlapping), dtype=np.int64)
     if len(selected_indices) == 0 or len(column_indices) == 0:
-        return selected_indices, np.empty(
-            (len(selected_indices), len(column_indices)), dtype=np.bool_
-        ), []
+        return (
+            selected_indices,
+            np.empty((len(selected_indices), len(column_indices)), dtype=np.bool_),
+            [],
+        )
     matrix = intersection_matrix_rectangular_thresholded(
         row_overlapping,
         row_non_overlapping,
@@ -634,17 +621,15 @@ def _detect_seam_candidates(
     if binary.size == 0:
         return []
     padded = np.pad(binary, 1, mode="constant")
-    joined = ndimage.binary_closing(
-        padded, structure=np.ones((3, 3), dtype=np.bool_)
-    )[1:-1, 1:-1]
+    joined = ndimage.binary_closing(padded, structure=np.ones((3, 3), dtype=np.bool_))[
+        1:-1, 1:-1
+    ]
     joined |= binary
     labels, component_count = ndimage.label(
         joined, structure=np.ones((3, 3), dtype=np.int8)
     )
     candidates = []
-    for component_slice in ndimage.find_objects(
-        labels, max_label=component_count
-    ):
+    for component_slice in ndimage.find_objects(labels, max_label=component_count):
         if component_slice is None:
             continue
         row_slice, column_slice = component_slice
@@ -658,10 +643,7 @@ def _detect_seam_candidates(
         supported_columns = (
             np.flatnonzero(np.any(original, axis=0)) + column_slice.start
         )
-        if (
-            len(supported_rows) < min_windows
-            or len(supported_columns) < min_windows
-        ):
+        if len(supported_rows) < min_windows or len(supported_columns) < min_windows:
             continue
         density, row_coverage, column_coverage, _hit_count = _block_statistics(
             binary, supported_rows, supported_columns
@@ -710,37 +692,37 @@ def detect_adjacent_band_bridge(
     cross_matrix = np.zeros((previous_count, current_count), dtype=np.bool_)
     links = []
 
-    previous_indices, previous_to_current, previous_links = (
-        _cross_candidate_to_all_links(
-            previous_overlapping,
-            previous_non_overlapping,
-            previous_candidates,
-            previous_prefix,
-            current_overlapping,
-            current_non_overlapping,
-            current_prefix,
-            window,
-            k,
-            identity,
-        )
+    (
+        previous_indices,
+        previous_to_current,
+        previous_links,
+    ) = _cross_candidate_to_all_links(
+        previous_overlapping,
+        previous_non_overlapping,
+        previous_candidates,
+        previous_prefix,
+        current_overlapping,
+        current_non_overlapping,
+        current_prefix,
+        window,
+        k,
+        identity,
     )
     if len(previous_indices):
         cross_matrix[previous_indices, :] |= previous_to_current
     links.extend(previous_links)
 
-    current_indices, current_to_previous, current_links = (
-        _cross_candidate_to_all_links(
-            current_overlapping,
-            current_non_overlapping,
-            current_candidates,
-            current_prefix,
-            previous_overlapping,
-            previous_non_overlapping,
-            previous_prefix,
-            window,
-            k,
-            identity,
-        )
+    current_indices, current_to_previous, current_links = _cross_candidate_to_all_links(
+        current_overlapping,
+        current_non_overlapping,
+        current_candidates,
+        current_prefix,
+        previous_overlapping,
+        previous_non_overlapping,
+        previous_prefix,
+        window,
+        k,
+        identity,
     )
     if len(current_indices):
         cross_matrix[:, current_indices] |= current_to_previous.T
@@ -750,9 +732,7 @@ def detect_adjacent_band_bridge(
     previous_seam_indices = np.arange(
         max(0, previous_count - halo), previous_count, dtype=np.int64
     )
-    current_seam_indices = np.arange(
-        0, min(halo, current_count), dtype=np.int64
-    )
+    current_seam_indices = np.arange(0, min(halo, current_count), dtype=np.int64)
     seam_candidates = []
     if len(previous_seam_indices) and len(current_seam_indices):
         seam_matrix = intersection_matrix_rectangular_thresholded(
@@ -765,9 +745,7 @@ def detect_adjacent_band_bridge(
             k,
             identity,
         )
-        cross_matrix[
-            np.ix_(previous_seam_indices, current_seam_indices)
-        ] |= seam_matrix
+        cross_matrix[np.ix_(previous_seam_indices, current_seam_indices)] |= seam_matrix
         previous_starts = previous_prefix + (previous_seam_indices * window)
         current_starts = current_prefix + (current_seam_indices * window)
         seam_candidates = _detect_seam_candidates(
@@ -894,14 +872,11 @@ class CandidateNeighborhoodAccumulator:
                     positions = np.flatnonzero(group_ids == group_id)
                     source_indices = local_indices[positions]
                     stored_indices, source = self._band_matrices[int(group_id)]
-                    source_positions = np.searchsorted(
-                        stored_indices, source_indices
-                    )
-                    if (
-                        np.any(source_positions >= len(stored_indices))
-                        or not np.array_equal(
-                            stored_indices[source_positions], source_indices
-                        )
+                    source_positions = np.searchsorted(stored_indices, source_indices)
+                    if np.any(
+                        source_positions >= len(stored_indices)
+                    ) or not np.array_equal(
+                        stored_indices[source_positions], source_indices
                     ):
                         raise ValueError(
                             "retained candidate window is missing from its band matrix"
@@ -1032,7 +1007,11 @@ def get_diagonal_span_from_sets(
     ]
     tuple_counts = Counter(coordinates)
     return sorted(
-        ((coordinate, count) for coordinate, count in tuple_counts.items() if count >= 3),
+        (
+            (coordinate, count)
+            for coordinate, count in tuple_counts.items()
+            if count >= 3
+        ),
         key=lambda item: item[0][0],
     )
 
@@ -1078,9 +1057,9 @@ def detect_periodic_lag_candidates_from_matches(
     for lag in range(1, max_lag + 1):
         denominator = window_count - lag
         if denominator > 0:
-            densities[lag] = np.count_nonzero(
-                lag_matches[lag, :denominator]
-            ) / denominator
+            densities[lag] = (
+                np.count_nonzero(lag_matches[lag, :denominator]) / denominator
+            )
     baseline = float(np.median(densities[min_lag:]))
     peak_threshold = max(
         minimum_peak_density,
@@ -1122,7 +1101,9 @@ def detect_periodic_lag_candidates_from_matches(
             or contrast < minimum_contrast
         ):
             continue
-        families.append((family_strength * len(family), base_lag, tuple(family), contrast))
+        families.append(
+            (family_strength * len(family), base_lag, tuple(family), contrast)
+        )
 
     if not families:
         return []
