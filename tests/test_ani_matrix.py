@@ -2,13 +2,22 @@ import numpy as np
 import anianns.parse_matrix as parse_matrix
 
 from anianns.ani_matrix import (
+    _diagonal_row_bounds,
+    _triangular_block_coordinates,
+    diagonal_span_bounds,
     intersection_len,
+    intersection_matrix_cross_groups_thresholded,
     intersection_matrix,
     intersection_matrix_inverted,
     intersection_matrix_rectangular,
     intersection_matrix_rectangular_thresholded,
+    intersection_matrix_selected_thresholded,
+    intersection_matrix_selected_vs_all_thresholded,
     intersection_matrix_thresholded,
     intersection_matrix_with_threshold,
+    intersection_reaches_threshold,
+    passes_identity,
+    periodic_lag_matches,
 )
 from anianns.parse_matrix import (
     CandidateNeighborhoodAccumulator,
@@ -30,6 +39,33 @@ from anianns.parse_matrix import (
 
 def test_intersection_len_counts_sorted_overlaps():
     assert intersection_len.py_func(np.array([1, 2, 4]), np.array([2, 3, 4])) == 2
+
+
+def test_threshold_helpers_cover_early_success_and_impossible_matches():
+    first = np.array([1, 2, 3, 4], dtype=np.int32)
+    matching = np.array([1, 2, 8, 9], dtype=np.int32)
+    different = np.array([8, 9, 10, 11], dtype=np.int32)
+    empty = np.array([], dtype=np.int32)
+
+    assert intersection_reaches_threshold.py_func(first, matching, 2)
+    assert not intersection_reaches_threshold.py_func(first, different, 2)
+    assert not intersection_reaches_threshold.py_func(first, matching, 3)
+    assert passes_identity.py_func(first, first, matching, matching, 0.5)
+    assert not passes_identity.py_func(first, first, different, different, 0.5)
+    assert not passes_identity.py_func(empty, empty, first, first, 0.5)
+
+
+def test_triangular_blocks_include_each_upper_triangle_block_once():
+    rows, columns = _triangular_block_coordinates.py_func(65, 32)
+
+    assert list(zip(rows.tolist(), columns.tolist())) == [
+        (0, 0),
+        (0, 1),
+        (0, 2),
+        (1, 1),
+        (1, 2),
+        (2, 2),
+    ]
 
 
 def test_intersection_matrix_is_symmetric_and_handles_empty_windows():
@@ -77,6 +113,81 @@ def test_rectangular_identity_matrix_returns_exact_scores():
     assert matrix.shape == (1, 2)
     assert matrix[0, 0] == 100.0
     assert matrix[0, 1] == 0.0
+
+
+def test_cross_group_matrix_skips_same_and_optionally_adjacent_groups():
+    matching = np.array([1, 2, 3, 4], dtype=np.int32)
+    sketches = [matching.copy() for _ in range(4)]
+    groups = np.array([0, 0, 1, 2], dtype=np.int64)
+
+    all_cross_group = intersection_matrix_cross_groups_thresholded.py_func(
+        sketches, sketches, groups, 2, 75
+    )
+    non_adjacent = intersection_matrix_cross_groups_thresholded.py_func(
+        sketches, sketches, groups, 2, 75, True
+    )
+
+    assert not all_cross_group[0, 1]
+    assert all_cross_group[0, 2]
+    assert all_cross_group[0, 3]
+    assert not non_adjacent[0, 2]
+    assert non_adjacent[0, 3]
+    assert not non_adjacent[2, 3]
+
+
+def test_matrix_free_bounds_tolerate_one_gap_and_stop_at_two():
+    matching = np.array([1, 2, 3, 4], dtype=np.int32)
+    different = np.array([20, 21, 22, 23], dtype=np.int32)
+    sketches = [
+        different.copy(),
+        different.copy(),
+        matching.copy(),
+        different.copy(),
+        matching.copy(),
+        matching.copy(),
+        different.copy(),
+        matching.copy(),
+        different.copy(),
+        different.copy(),
+    ]
+
+    assert _diagonal_row_bounds.py_func(5, sketches, sketches, 0.5, 2) == (2, 7)
+    starts, ends = diagonal_span_bounds.py_func(sketches, sketches, 2, 75, 2)
+    assert (starts[5], ends[5]) == (2, 7)
+
+
+def test_periodic_lag_matches_bounds_lag_and_marks_matching_pairs():
+    matching = np.array([1, 2, 3, 4], dtype=np.int32)
+    different = np.array([20, 21, 22, 23], dtype=np.int32)
+    sketches = [matching, different, matching.copy()]
+
+    matches = periodic_lag_matches.py_func(sketches, sketches, 2, 75, 10)
+    no_lags = periodic_lag_matches.py_func(sketches, sketches, 2, 75, -1)
+
+    assert matches.shape == (3, 3)
+    assert matches[2, 0]
+    assert not matches[1, 0]
+    assert no_lags.shape == (1, 3)
+
+
+def test_selected_matrix_kernels_preserve_requested_index_mapping():
+    matching = np.array([1, 2, 3, 4], dtype=np.int32)
+    different = np.array([20, 21, 22, 23], dtype=np.int32)
+    sketches = [matching, different, matching.copy(), different.copy()]
+    selected = np.array([0, 2], dtype=np.int64)
+
+    selected_only = intersection_matrix_selected_thresholded.py_func(
+        sketches, sketches, selected, 2, 75
+    )
+    selected_to_all = intersection_matrix_selected_vs_all_thresholded.py_func(
+        sketches, sketches, selected, 2, 75
+    )
+
+    assert selected_only.tolist() == [[True, True], [True, True]]
+    assert selected_to_all.tolist() == [
+        [True, False, True, False],
+        [True, False, True, False],
+    ]
 
 
 def test_sobel_edge_mask_outlines_matrix_blocks():
