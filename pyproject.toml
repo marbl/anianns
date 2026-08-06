@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "anianns"
-version = "0.6.1"
+version = "0.7.0"
 description = "A Python package for annotating large tandem repeats"
 authors = [
     { name="Alex Sweeten", email="alex.sweeten@nih.gov" }
@@ -17,18 +17,20 @@ classifiers = [
     "License :: OSI Approved :: MIT License"
 ]
 dependencies = [
-    "pyGenomeTracks",
+    "alive-progress>=3.3,<4",
     "pysam",
     "setproctitle",
     "numpy",
     "polars",
     "mmh3",
     "numba",
+    "matplotlib",
+    "scipy",
     "seaborn",
 ]
 [project.optional-dependencies]
 moddotplot = ["moddotplot"]
-dev = ["black", "coverage", "jupyter", "ipykernel", "pytest", "pytest-cov", "biopython", "seaborn"]
+dev = ["black", "pytest", "pytest-cov"]
 [project.scripts]
 anianns = "anianns.__main__:main"
 anianns_kmer_db = "anianns.build_kmer_db:main"

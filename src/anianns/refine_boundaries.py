@@ -1,24 +1,131 @@
 import polars as pl
-from anianns.kmer_utils import (
-    generate_kmers_from_fasta,
-    generate_kmers_from_fasta_forward_only,
-)
-from itertools import islice
 import math
-import sys
 import numpy as np
 
 from anianns.classification import load_all_kmer_dbs, classify_kmers
 
 from anianns.general_utils import (
     extract_region,
-    extract_histograms_by_name,
-    generate_kmers_from_fasta,
-    generate_kmers_from_fasta_forward_only,
     top_n_frequent_distances,
-    calculate_distances,
     merge_close_values,
 )
+from anianns.kmer_pipeline import canonical_kmer_hashes, forward_kmer_hashes
+from anianns.kmer_utils import calculate_hash_distances
+
+
+BOUNDARY_GRAPH_MAX_WIDTH = 80
+BOUNDARY_GRAPH_PREFIX_WIDTH = 7
+MIN_NTR_MONOMER_SIZE = 3
+
+
+def has_valid_ntr_monomer(prism_result):
+    """Return whether an NTRPrism result contains an allowed base unit."""
+    if not prism_result:
+        return False
+    monomer = prism_result[0]
+    try:
+        return monomer is not None and monomer >= MIN_NTR_MONOMER_SIZE
+    except TypeError:
+        return False
+
+
+def boundary_graph_columns(
+    shared_counts,
+    stop_index,
+    plot_height,
+    max_columns=BOUNDARY_GRAPH_MAX_WIDTH - BOUNDARY_GRAPH_PREFIX_WIDTH,
+):
+    """Aggregate boundary-search chunks into terminal-safe graph columns."""
+    if not shared_counts:
+        return [], 1
+    column_count = min(len(shared_counts), max(1, int(max_columns)))
+    max_count = max(count for _, count in shared_counts) or 1
+    columns = []
+    for column in range(column_count):
+        start = (column * len(shared_counts)) // column_count
+        end = ((column + 1) * len(shared_counts)) // column_count
+        bucket = shared_counts[start:end]
+        bucket_count = max(count for _, count in bucket)
+        columns.append(
+            (
+                any(index == stop_index for index, _ in bucket),
+                int((bucket_count / max_count) * plot_height),
+            )
+        )
+    return columns, max_count
+
+
+def boundary_graph_label_line(offset, boundary_size, graph_width):
+    """Format the coordinate labels without exceeding the graph width."""
+    available_width = max(1, BOUNDARY_GRAPH_MAX_WIDTH - 5)
+    graph_width = min(int(graph_width), available_width)
+    left_label = str(offset)
+    right_label = str(offset + boundary_size)
+    if len(left_label) + len(right_label) >= graph_width:
+        label_budget = max(1, (graph_width - 1) // 2)
+        left_label = left_label[:label_budget]
+        right_label = right_label[-label_budget:]
+    spacing = max(1, graph_width - len(left_label) - len(right_label))
+    return ("     " + left_label + (" " * spacing) + right_label)[
+        :BOUNDARY_GRAPH_MAX_WIDTH
+    ]
+
+
+def recurrent_kmer_set(kmer_hashes, minimum_occurrences=3, minimum_unique=25):
+    """Return repeat-specific k-mers suitable for a failed boundary search."""
+    hashes = np.asarray(kmer_hashes, dtype=np.int32)
+    hashes = hashes[hashes != 0]
+    if hashes.size == 0:
+        return None
+    values, counts = np.unique(hashes, return_counts=True)
+    recurrent = values[counts >= minimum_occurrences]
+    if len(recurrent) < minimum_unique:
+        return None
+    return set(recurrent.tolist())
+
+
+def format_ntrprism_verbose_value(kmer, prism_result, *, user_selected=False):
+    """Format one NTRPrism result for an accepted-candidate summary."""
+    label = f"NTRPrism k={int(kmer)}"
+    if user_selected:
+        label += " (user-selected)"
+    monomer = prism_result[0]
+    if not has_valid_ntr_monomer(prism_result):
+        return f"{label}: rejected"
+    summary = f"{label}: monomer={monomer} bp"
+    if prism_result[1]:
+        summary += f"; HOR periodicity={prism_result[2]}"
+    return summary
+
+
+def region_canonical_hashes(
+    fasta_file,
+    seq_id,
+    region_start,
+    region_end,
+    k,
+    sequence_hashes=None,
+):
+    """Return canonical hashes from the chromosome cache or a batch fallback."""
+    region_start = max(1, int(region_start))
+    region_end = max(region_start, int(region_end))
+    if sequence_hashes is not None:
+        hash_start = min(region_start, len(sequence_hashes))
+        hash_end = min(
+            len(sequence_hashes),
+            max(hash_start, region_end - k + 1),
+        )
+        return np.asarray(sequence_hashes[hash_start:hash_end], dtype=np.int32)
+
+    sequence = extract_region(
+        fasta_file=fasta_file,
+        chr=seq_id,
+        region_start=region_start,
+        region_end=region_end,
+    )
+    if not sequence:
+        return np.empty(0, dtype=np.int32)
+    return canonical_kmer_hashes(sequence, k)
 
 
 def refine_L_from_peaks(dist_counts, L_init, max_rel_err=0.1, max_n=40):
@@ -172,10 +279,10 @@ def hor_test_local_enrichment(
         return True, hor_harmonics
 
 
-def ntr_prism(region, size, kmer_large, verbose=False):
-    kmers_low = generate_kmers_from_fasta_forward_only(seq=region, k=6, quiet=True)
-    kmer_list_low = list(islice(kmers_low, 1, size))
-    histo_list_low = calculate_distances(kmer_list_low)
+def ntr_prism(region, size, kmer=21, verbose=False):
+    kmers_low = forward_kmer_hashes(region, kmer)
+    kmer_list_low = kmers_low[1:size]
+    histo_list_low = calculate_hash_distances(kmer_list_low)
     top_dists_low = top_n_frequent_distances(histo_list_low, 6)
     grouped_dists_low = merge_close_values(top_dists_low, 6)
 
@@ -190,10 +297,14 @@ def ntr_prism(region, size, kmer_large, verbose=False):
             print("Size must be > 0 to compute percentages.")
         return None, False, None
 
-    grouped = list(grouped_dists_low)
+    grouped = [
+        (distance, count)
+        for distance, count in grouped_dists_low
+        if distance is not None and distance >= MIN_NTR_MONOMER_SIZE
+    ]
     if not grouped:
         if verbose:
-            print("No grouped distances found.")
+            print("No grouped distances at or above the 3 bp minimum monomer size.")
         return None, False, None
 
     top_total_count = sum(count for (_, count) in grouped)
@@ -234,18 +345,14 @@ def ntr_prism(region, size, kmer_large, verbose=False):
     # Decide monomer_size
     monomer_size = lowest_dist  # sensible default
 
-    if lowest_dist is None or lowest_dist == 0:
-        if verbose:
-            print("Lowest distance is 0/None; cannot check harmonics safely.")
-        monomer_size = most_populous_dist  # fallback to most populous
-    elif lowest_dist != most_populous_dist:
+    if lowest_dist != most_populous_dist:
         ratio = most_populous_dist / lowest_dist
         n = round(ratio)
 
         rel_tol = 0.02  # 2% tolerance
 
         # NOTE: compare absolute error in ratio space
-        is_harmonic = (n >= 1) and (abs(ratio - n) <= rel_tol)
+        is_harmonic = (n >= 2) and (abs(ratio - n) <= rel_tol)
 
         if is_harmonic:
             if verbose:
@@ -253,8 +360,14 @@ def ntr_prism(region, size, kmer_large, verbose=False):
             monomer_size = lowest_dist
         else:
             if verbose:
-                print("Not a harmonic relationship")
-            # keep monomer_size = lowest_dist (already set)
+                print(
+                    "Not a harmonic relationship; using the most populous "
+                    f"distance ({most_populous_dist})"
+                )
+            # A short incidental spacing must not override an unrelated,
+            # strongly supported repeat period. Prefer the lowest peak only
+            # when it plausibly explains the dominant peak as a harmonic.
+            monomer_size = most_populous_dist
 
     # HOR test — uses monomer_size as L_init (not always lowest_dist)
     res = hor_test_local_enrichment(
@@ -286,8 +399,8 @@ def ntr_prism(region, size, kmer_large, verbose=False):
             match = next(
                 (t for t in top10 if abs(t[0] - target) <= 0.02 * target), None
             )
-
-            nested_repeats.append(match[0])
+            if match is not None:
+                nested_repeats.append(match[0])
 
     return monomer_size, is_hor, periodicity, nested_repeats
 
@@ -303,25 +416,35 @@ def detect_precise_boundaries(
     classify,
     previous_coordinates,
     interval=None,
+    sequence_hashes=None,
+    strong_matrix_evidence=False,
 ):
+    candidate_start = max(0, min(int(coordinates[0]), seq_len))
+    candidate_end = max(candidate_start, min(int(coordinates[1]), seq_len))
+    candidate_boundaries = (candidate_start, candidate_end)
+
     # Get the sequence of the specified region, subtracted by 1.5 * window size as a potential buffer region.
     interval = math.ceil(window / 2)
-    array_seq_size = coordinates[1] - coordinates[0]
+    array_seq_size = candidate_end - candidate_start
+    if array_seq_size <= 0:
+        return None
 
     # Check if the buffer is too large for the array size
     if array_seq_size < (2 * window):
-        print(f"Scaling down window size for {array_seq_size} bp array\n")
-        window = math.ceil(array_seq_size // 4)
-        interval = math.ceil(window // 2)
+        window = max(1, math.ceil(array_seq_size / 4))
+        interval = math.ceil(window / 2)
 
-    core_start = coordinates[0] + window + interval
-    core_end = coordinates[1] - window - interval
+    core_start = max(0, candidate_start + window + interval)
+    core_end = min(seq_len, candidate_end - window - interval)
     core_seq_size = core_end - core_start
 
-    if verbose:
-        print(
-            f"Estimated satellite array is {coordinates}, equal to {array_seq_size} bp\n"
-        )
+    if core_seq_size <= 0:
+        if verbose:
+            print(
+                f"Removed candidate {candidate_start}-{candidate_end}: "
+                "the boundary-refinement core is empty."
+            )
+        return None
 
     core_seq = extract_region(
         fasta_file=fasta_file, chr=seq_id, region_start=core_start, region_end=core_end
@@ -329,16 +452,43 @@ def detect_precise_boundaries(
 
     if not core_seq:
         if verbose:
-            print(f"Unable to get core sequence for {core_start}-{core_end}\n")
+            print(
+                f"Removed candidate {candidate_start}-{candidate_end}: "
+                f"unable to extract core sequence {core_start}-{core_end}."
+            )
         return None
 
-    prism_res = ntr_prism(core_seq, core_seq_size, k)
-
-    # If ntr_prism says "remove satellite", drop this whole region
-    if prism_res[0] is None:
+    k6_prism_res = ntr_prism(core_seq, core_seq_size, 6)
+    user_prism_res = (
+        k6_prism_res if int(k) == 6 else ntr_prism(core_seq, core_seq_size, k)
+    )
+    prism_res = k6_prism_res if has_valid_ntr_monomer(k6_prism_res) else user_prism_res
+    # Matrix and distal evidence can nominate candidates, but cannot replace
+    # direct repeat-period evidence for the candidate itself.
+    if not has_valid_ntr_monomer(prism_res):
         if verbose:
-            print(f"ntr_prism returned None for {coordinates}; removing region.\n")
+            evidence = "strong" if strong_matrix_evidence else "weak"
+            rejected_k = "k=6" if int(k) == 6 else f"k=6 and k={k}"
+            print(
+                f"Removed candidate {candidate_start}-{candidate_end}: "
+                f"NTRPrism rejected at {rejected_k}; matrix support was "
+                f"{evidence}."
+            )
         return None
+
+    if sequence_hashes is None:
+        core_hashes = canonical_kmer_hashes(core_seq, k)
+    else:
+        core_hashes = region_canonical_hashes(
+            fasta_file,
+            seq_id,
+            core_start,
+            core_end,
+            k,
+            sequence_hashes,
+        )
+    array_kmer_set = set(core_hashes.tolist())
+    recurrent_core_kmers = recurrent_kmer_set(core_hashes)
 
     # This survived the ntr_prism purge, find the boundary
     left_boundary = detect_left_boundary(
@@ -346,7 +496,7 @@ def detect_precise_boundaries(
         array_seq=core_seq,
         array_seq_size=core_seq_size,
         seq_id=seq_id,
-        boundary_point=coordinates[0],
+        boundary_point=candidate_start,
         k=k,
         window=window,
         interval=interval,
@@ -355,6 +505,8 @@ def detect_precise_boundaries(
         prev_border_coordinate=previous_coordinates[1],
         boundary=0,
         expanded=False,
+        array_kmer_set=array_kmer_set,
+        sequence_hashes=sequence_hashes,
     )
 
     right_boundary = detect_right_boundary(
@@ -362,7 +514,7 @@ def detect_precise_boundaries(
         array_seq=core_seq,
         array_seq_size=core_seq_size,
         seq_id=seq_id,
-        boundary_point=coordinates[1],
+        boundary_point=candidate_end,
         limit=None,
         k=k,
         window=window,
@@ -371,42 +523,57 @@ def detect_precise_boundaries(
         verbosity=verbose,
         bordering=False,
         boundary=seq_len,
+        array_kmer_set=array_kmer_set,
+        fallback_array_kmer_set=recurrent_core_kmers,
+        sequence_hashes=sequence_hashes,
     )
 
-    if not left_boundary or not right_boundary:
-        if verbose:
-            print(f"Error getting boundaries for {core_start}-{core_end}\n")
-        return None
+    if left_boundary is None:
+        left_boundary = candidate_start
+    if right_boundary is None:
+        right_boundary = candidate_end
+
+    left_boundary = max(0, min(int(left_boundary), seq_len))
+    right_boundary = max(0, min(int(right_boundary), seq_len))
+    if right_boundary <= left_boundary:
+        left_boundary, right_boundary = candidate_boundaries
 
     if classify:
         array_seq_size = right_boundary - left_boundary
-        array_seq = extract_region(
-            fasta_file=fasta_file,
-            chr=seq_id,
-            region_start=left_boundary,
-            region_end=right_boundary,
+        array_hashes = region_canonical_hashes(
+            fasta_file,
+            seq_id,
+            left_boundary,
+            right_boundary,
+            k,
+            sequence_hashes,
         )
-        if not array_seq:
-            if verbose:
-                print(f"Unable to extract array sequence for {coordinates}\n")
-            return None
-
-        array_kmers = generate_kmers_from_fasta(array_seq, k, True)
-        query_set = set(islice(array_kmers, array_seq_size))
-
-        # Use the classification function
-        if not verbose:
-            verbose = False
-        best_match, results = classify_kmers(query_set, classify, verbose)
-        if not best_match:
+        if len(array_hashes) == 0:
             best_match = "Unknown"
-        if verbose:
-            print("---------------------")
-        if verbose:
-            if best_match:
-                print(f"Best classification: {best_match}")
-            else:
-                print("No significant match found")
+        else:
+            query_set = set(array_hashes[:array_seq_size].tolist())
+            try:
+                best_match, results = classify_kmers(query_set, classify, False)
+            except Exception:
+                best_match = "Unknown"
+            if not best_match:
+                best_match = "Unknown"
+
+    if verbose:
+        evidence = "strong" if strong_matrix_evidence else "weak"
+        classification_summary = f" (classification={best_match})" if classify else ""
+        print(
+            f"Accepted candidate {candidate_start}-{candidate_end}"
+            f"{classification_summary}:"
+        )
+        print(f"    {evidence.capitalize()} matrix support")
+        print("    " + format_ntrprism_verbose_value(6, k6_prism_res))
+        print(
+            "    "
+            + format_ntrprism_verbose_value(k, user_prism_res, user_selected=True)
+        )
+        print(f"    Estimated left boundary: {left_boundary}")
+        print(f"    Estimated right boundary: {right_boundary}")
 
     return (
         (left_boundary, right_boundary, best_match, prism_res)
@@ -429,6 +596,8 @@ def detect_left_boundary(
     prev_border_coordinate,
     boundary,
     expanded=False,
+    array_kmer_set=None,
+    sequence_hashes=None,
 ):
     boundary_start = boundary_point - window - (interval * 4)
     # if prev_border_coordinate > (boundary_start - interval):
@@ -440,21 +609,21 @@ def detect_left_boundary(
 
     boundary_end = boundary_point + window + (interval * 4)
     boundary_size = boundary_end - boundary_start
+    if boundary_size <= 0:
+        return None
 
-    border_seq = extract_region(
-        fasta_file=fasta_file,
-        chr=seq_id,
-        region_start=boundary_start,
-        region_end=boundary_end,
-    )
-
-    # Generate k-mers and convert to sets for faster operations
-    array_kmers = generate_kmers_from_fasta(array_seq, k, True)
-    border_kmers = generate_kmers_from_fasta(border_seq, k, True)
-
-    array_kmer_set = set(islice(array_kmers, array_seq_size))
-    array_kmers = generate_kmers_from_fasta(array_seq, k, True)
-    border_kmer_list = list(islice(border_kmers, boundary_size))
+    if array_kmer_set is None:
+        array_kmer_set = set(canonical_kmer_hashes(array_seq, k).tolist())
+    border_kmer_list = region_canonical_hashes(
+        fasta_file,
+        seq_id,
+        boundary_start,
+        boundary_end,
+        k,
+        sequence_hashes,
+    ).tolist()
+    if not border_kmer_list:
+        return None
 
     # Process boundary in fixed length of 100bp
     steps = math.ceil(boundary_size / boundary_chunk_size)
@@ -466,6 +635,8 @@ def detect_left_boundary(
         verbose=verbosity,
         step_size=steps,
     )
+    if last_nonzero_step is None:
+        return None
     possible_range = (
         boundary_start + (boundary_chunk_size * last_nonzero_step),
         boundary_start
@@ -478,9 +649,6 @@ def detect_left_boundary(
         if boundary_start <= window:
             return boundary_start
         else:
-            if verbosity:
-                print("Boundary needs to be extended left...\n")
-
             if not expanded:
                 return detect_left_boundary(
                     fasta_file=fasta_file,
@@ -496,54 +664,30 @@ def detect_left_boundary(
                     prev_border_coordinate=prev_border_coordinate,
                     boundary=0,
                     expanded=True,
+                    array_kmer_set=array_kmer_set,
+                    sequence_hashes=sequence_hashes,
                 )
             else:
                 if prev_border_coordinate > boundary_point - window:
-                    prev_border_coordinate + 1
                     return prev_border_coordinate + 1
-
-            """updated_boundary_start = int(boundary_start - (interval * 10))
-            updated_boundary_end = int(boundary_end + (interval * 10))
-            print(f"DDD {updated_boundary_start} - {updated_boundary_end}\n")
-            updated_boundary_size = updated_boundary_end - updated_boundary_start
-            updated_border_seq = extract_region(
-                fasta_file=fasta_file,
-                chr=seq_id,
-                region_start=updated_boundary_start,
-                region_end=updated_boundary_end,
-            )
-            updated_border_kmers = generate_kmers_from_fasta(updated_border_seq, k, True)
-            updated_border_kmer_list = list(
-                islice(updated_border_kmers, updated_boundary_size)
-            )
-            updated_steps = math.ceil(updated_boundary_size / 100)
-            last_nonzero_step = find_target_fixed_window_left(
-                array_kmer_set=array_kmer_set,
-                border_kmer_list=updated_border_kmer_list,
-                boundary_size=updated_boundary_size,
-                offset=updated_boundary_start,
-                verbose=verbosity,
-                step_size=updated_steps,
-            )
-            print("Testing") """
+                return max(boundary, boundary_point)
 
     # Case where boundary needs to be extended to the right
     elif last_nonzero_step >= steps - 1:
-        if verbosity:
-            print("Boundary needs to be extended right.\n")
         updated_boundary_start = boundary_end - interval
         updated_boundary_end = boundary_end + (interval * 4)
+        updated_boundary_start = max(boundary, updated_boundary_start)
         updated_boundary_size = updated_boundary_end - updated_boundary_start
-        updated_border_seq = extract_region(
-            fasta_file=fasta_file,
-            chr=seq_id,
-            region_start=updated_boundary_start,
-            region_end=updated_boundary_end,
-        )
-        updated_border_kmers = generate_kmers_from_fasta(updated_border_seq, k, True)
-        updated_border_kmer_list = list(
-            islice(updated_border_kmers, updated_boundary_size)
-        )
+        updated_border_kmer_list = region_canonical_hashes(
+            fasta_file,
+            seq_id,
+            updated_boundary_start,
+            updated_boundary_end,
+            k,
+            sequence_hashes,
+        ).tolist()
+        if not updated_border_kmer_list:
+            return None
         updated_steps = math.ceil(updated_boundary_size / 100)
         last_nonzero_step = find_target_fixed_window_left(
             array_kmer_set=array_kmer_set,
@@ -553,11 +697,11 @@ def detect_left_boundary(
             verbose=verbosity,
             step_size=updated_steps,
         )
+        if last_nonzero_step is None:
+            return None
 
         # Error case
-        if last_nonzero_step <= 1 or last_nonzero_step >= updated_steps - 1:
-            if verbosity:
-                print("Unable to resolve left boundary\n")
+        if last_nonzero_step <= 0 or last_nonzero_step >= updated_steps - 1:
             return None
 
         # find_target_fixed_window_left(array_kmer_set, updated_border_kmer_list, updated_boundary_size, updated_boundary_start, updated_steps)
@@ -566,38 +710,26 @@ def detect_left_boundary(
             updated_boundary_start + (100 * last_nonzero_step) + 200,
         )
         # print(f"New possible range: {possible_range[0]}-{possible_range[1]}")
-        if verbosity:
-            print(
-                f"Narrowing down the range for the updated left boundary: {possible_range[0]-math.ceil(boundary_chunk_size/2)}-{possible_range[1] + math.ceil(boundary_chunk_size/2)}\n"
-            )
         border_array_start = boundary_chunk_size * last_nonzero_step
         border_array_end = border_array_start + (2 * boundary_chunk_size)
 
         estimated_index = find_last_matching_index(
-            border_kmer_list, array_kmer_set, border_array_start, border_array_end
+            updated_border_kmer_list,
+            array_kmer_set,
+            border_array_start,
+            border_array_end,
         )
-        if verbosity:
-            print(
-                f"Estimated left boundary: {estimated_index + updated_boundary_start + k}\n"
-            )
-        return estimated_index + updated_boundary_start + k
+        return max(boundary, estimated_index + updated_boundary_start + k)
 
     else:
-        if verbosity:
-            print(verbosity)
-            print(
-                f"Narrowing down the range for the left boundary: {possible_range[0]-math.ceil(boundary_chunk_size/2)}-{possible_range[1] + math.ceil(boundary_chunk_size/2)}\n"
-            )
         border_array_start = boundary_chunk_size * last_nonzero_step
         border_array_end = border_array_start + (2 * boundary_chunk_size)
 
         estimated_index = find_last_matching_index(
             border_kmer_list, array_kmer_set, border_array_start, border_array_end
         )
-        if verbosity:
-            print(f"Estimated left boundary: {estimated_index + boundary_start + k}\n")
-        return (
-            estimated_index + boundary_start - k
+        return max(
+            boundary, estimated_index + boundary_start - k
         )  # Return the estimated boundary position adjusted by k-mer size
 
 
@@ -615,27 +747,71 @@ def detect_right_boundary(
     verbosity=False,
     bordering=False,
     boundary=0,
+    array_kmer_set=None,
+    fallback_array_kmer_set=None,
+    sequence_hashes=None,
 ):
-    boundary_start = boundary_point - window - interval
+    boundary_start = max(0, boundary_point - window - interval)
     boundary_end = boundary_point + window + interval
-    boundary_start = boundary_point - window - interval
-    # Ensure value is less than 0
+    # Keep the search inside the sequence.
     if boundary_end > boundary:
         boundary_end = boundary
     boundary_size = boundary_end - boundary_start
-    border_seq = extract_region(
-        fasta_file=fasta_file,
-        chr=seq_id,
-        region_start=boundary_start,
-        region_end=boundary_end,
-    )
+    if boundary_size <= 0:
+        return None
+    if array_kmer_set is None:
+        array_kmer_set = set(canonical_kmer_hashes(array_seq, k).tolist())
+    border_kmer_list = region_canonical_hashes(
+        fasta_file,
+        seq_id,
+        boundary_start,
+        boundary_end,
+        k,
+        sequence_hashes,
+    ).tolist()
+    if not border_kmer_list:
+        return None
 
-    # Generate k-mers and convert to sets for faster operations
-    array_kmers = generate_kmers_from_fasta(array_seq, k, True)
-    border_kmers = generate_kmers_from_fasta(border_seq, k, True)
-
-    array_kmer_set = set(islice(array_kmers, array_seq_size))
-    border_kmer_list = list(islice(border_kmers, boundary_size))
+    def search_left_of_initial_range(search_kmers):
+        """Recover a boundary that lies before the initial search window."""
+        if not search_kmers:
+            return None
+        updated_boundary_end = min(boundary, boundary_start + interval)
+        updated_boundary_start = max(0, boundary_start - (interval * 4))
+        updated_boundary_size = updated_boundary_end - updated_boundary_start
+        if updated_boundary_size <= 0:
+            return None
+        updated_border_kmer_list = region_canonical_hashes(
+            fasta_file,
+            seq_id,
+            updated_boundary_start,
+            updated_boundary_end,
+            k,
+            sequence_hashes,
+        ).tolist()
+        if not updated_border_kmer_list:
+            return None
+        updated_steps = math.ceil(updated_boundary_size / boundary_chunk_size)
+        updated_last_nonzero_step = find_target_fixed_window_right(
+            array_kmer_set=search_kmers,
+            border_kmer_list=updated_border_kmer_list,
+            boundary_size=updated_boundary_size,
+            offset=updated_boundary_start,
+            verbose=verbosity,
+            step_size=updated_steps,
+        )
+        if updated_last_nonzero_step is None:
+            return None
+        border_array_start = boundary_chunk_size * updated_last_nonzero_step
+        border_array_end = border_array_start + (2 * boundary_chunk_size)
+        estimated_index = find_last_matching_index(
+            updated_border_kmer_list,
+            search_kmers,
+            border_array_start,
+            border_array_end,
+        )
+        estimate = estimated_index + updated_boundary_start + k
+        return min(boundary, max(0, estimate))
 
     # Process boundary in fixed length of 100bp
     steps = math.ceil(boundary_size / boundary_chunk_size)
@@ -647,6 +823,8 @@ def detect_right_boundary(
         verbose=verbosity,
         step_size=steps,
     )
+    if last_nonzero_step is None:
+        return search_left_of_initial_range(fallback_array_kmer_set)
     possible_range = (
         boundary_start + (boundary_chunk_size * last_nonzero_step),
         boundary_start
@@ -656,29 +834,26 @@ def detect_right_boundary(
 
     # Case for boundary extending to the right
     if last_nonzero_step >= steps - 1:
-        if verbosity:
-            print("Boundary needs to be extended right. Likely an error.\n")
-        return None
+        if boundary_end >= boundary:
+            return boundary
 
-    # Case for boundary extending left
-    elif last_nonzero_step <= 1:
-        if verbosity:
-            print("Boundary needs to be extended left.\n")
-        updated_boundary_end = boundary_start + interval
-        updated_boundary_start = boundary_start - (interval * 4)
+        updated_boundary_start = max(0, boundary_end - interval)
+        updated_boundary_end = min(boundary, boundary_end + (interval * 4))
         updated_boundary_size = updated_boundary_end - updated_boundary_start
-        updated_border_seq = extract_region(
-            fasta_file=fasta_file,
-            chr=seq_id,
-            region_start=updated_boundary_start,
-            region_end=updated_boundary_end,
-        )
-        updated_border_kmers = generate_kmers_from_fasta(updated_border_seq, k, True)
-        updated_border_kmer_list = list(
-            islice(updated_border_kmers, updated_boundary_size)
-        )
-        updated_steps = math.ceil(updated_boundary_size / 100)
-        last_nonzero_step = find_target_fixed_window_right(
+        if updated_boundary_size <= 0:
+            return None
+        updated_border_kmer_list = region_canonical_hashes(
+            fasta_file,
+            seq_id,
+            updated_boundary_start,
+            updated_boundary_end,
+            k,
+            sequence_hashes,
+        ).tolist()
+        if not updated_border_kmer_list:
+            return None
+        updated_steps = math.ceil(updated_boundary_size / boundary_chunk_size)
+        updated_last_nonzero_step = find_target_fixed_window_right(
             array_kmer_set=array_kmer_set,
             border_kmer_list=updated_border_kmer_list,
             boundary_size=updated_boundary_size,
@@ -686,60 +861,56 @@ def detect_right_boundary(
             verbose=verbosity,
             step_size=updated_steps,
         )
+        if updated_last_nonzero_step is None:
+            return None
+        if (
+            updated_last_nonzero_step >= updated_steps - 1
+            and updated_boundary_end < boundary
+        ):
+            return None
 
-        if verbosity:
-            print(
-                f"Narrowing down the range for the updated right boundary: {possible_range[0]-math.ceil(boundary_chunk_size/2)}-{possible_range[1] + math.ceil(boundary_chunk_size/2)}\n"
-            )
-        border_array_start = boundary_chunk_size * last_nonzero_step
+        border_array_start = boundary_chunk_size * updated_last_nonzero_step
         border_array_end = border_array_start + (2 * boundary_chunk_size)
-
         estimated_index = find_last_matching_index(
-            border_kmer_list, array_kmer_set, border_array_start, border_array_end
+            updated_border_kmer_list,
+            array_kmer_set,
+            border_array_start,
+            border_array_end,
         )
-        if verbosity:
-            print(updated_boundary_start)
-            print(
-                f"Estimated right boundary: {estimated_index + updated_boundary_start + k}\n"
-            )
-        return estimated_index + updated_boundary_start + k
+        return min(boundary, estimated_index + updated_boundary_start + k)
+
+    # Case for boundary extending left
+    elif last_nonzero_step <= 1:
+        return search_left_of_initial_range(array_kmer_set)
 
     else:
-        if verbosity:
-            print(
-                f"Narrowing down the range for the right boundary: {possible_range[0]-math.ceil(boundary_chunk_size/2)}-{possible_range[1] + math.ceil(boundary_chunk_size/2)}"
-            )
         border_array_start = boundary_chunk_size * last_nonzero_step
         border_array_end = border_array_start + (2 * boundary_chunk_size)
 
         estimated_index = find_last_matching_index(
             border_kmer_list, array_kmer_set, border_array_start, border_array_end
         )
-        if verbosity:
-            print(border_array_start)
-            print(
-                f"Estimated right boundary: {estimated_index + border_array_start + k}\n"
-            )
-        return (
-            estimated_index + boundary_start + k
+        return min(
+            boundary, max(0, estimated_index + boundary_start + k)
         )  # Return the estimated boundary position adjusted by k-mer size
 
 
 def find_target_fixed_window_left(
     array_kmer_set, border_kmer_list, boundary_size, offset, verbose, step_size=100
 ):
-    steps = math.ceil(boundary_size / step_size)
-    threshold = math.ceil(step_size / 4)
-    last_nonzero_step = steps - 1
+    chunk_count = max(1, int(step_size))
+    chunk_size = max(1, math.ceil(boundary_size / chunk_count))
+    threshold = math.ceil(chunk_size / 4)
+    last_nonzero_step = None
 
     shared_counts = []
 
     count = 0
-    for i in range(step_size - 1, -1, -1):
-        start_idx = i * steps
-        end_idx = min((i + 1) * steps, len(border_kmer_list))
-        border_chunk_set = set(border_kmer_list[start_idx:end_idx])
-        shared_count = len(array_kmer_set & border_chunk_set)
+    for i in range(chunk_count - 1, -1, -1):
+        start_idx = i * chunk_size
+        end_idx = min((i + 1) * chunk_size, len(border_kmer_list))
+        border_chunk = border_kmer_list[start_idx:end_idx]
+        shared_count = sum(kmer in array_kmer_set for kmer in border_chunk)
         shared_counts.append((i, shared_count))
 
         if shared_count > threshold and count < 10:
@@ -748,61 +919,52 @@ def find_target_fixed_window_left(
         else:
             count += 1
 
-    # Normalize for plotting
-    max_count = max(count for _, count in shared_counts) or 1
     plot_height = 10  # Reduced from 20 to 10 for half the height
-    scaled_counts = [
-        (i, int((count / max_count) * plot_height)) for i, count in shared_counts
-    ]
 
-    if verbose:
-        print(
-            f"Find left boundary point from range {offset}-{offset + (steps * step_size)}\n"
+    show_histogram = (
+        verbose
+        and last_nonzero_step is not None
+        and 1 < last_nonzero_step < chunk_count - 1
+    )
+    if show_histogram:
+        graph_columns, max_count = boundary_graph_columns(
+            shared_counts, last_nonzero_step, plot_height
         )
         for y in range(plot_height, -1, -1):
             line = f"{str(int(y * max_count / plot_height)).rjust(4)} | "
-            for idx, height in reversed(scaled_counts):
+            for contains_stop, height in reversed(graph_columns):
                 if height >= y:
-                    # Mark the stop position with a distinct symbol, e.g. '|'
-                    if idx == last_nonzero_step:
-                        line += "|"
-                    else:
-                        line += "#"
+                    line += "|" if contains_stop else "#"
                 else:
                     line += " "
             print(line)
 
         # X-axis line
-        axis_line = "     " + "-" * step_size
+        graph_width = len(graph_columns)
+        axis_line = "     " + "-" * graph_width
         print(axis_line)
 
         # X-axis labels: leftmost and rightmost only
-        left_label = str(offset)
-        right_label = str(offset + (steps * step_size))
-        spacing = step_size - len(left_label) - len(right_label)
-        label_line = "     " + left_label + (" " * spacing) + right_label
-        print(label_line)
+        print(boundary_graph_label_line(offset, boundary_size, graph_width))
 
-        print(f"\nBoundary stop index: {last_nonzero_step}\n")
-
-    # Return the index of the left boundary (slightly adjusted)
-    return last_nonzero_step - 1
+    return last_nonzero_step
 
 
 def find_target_fixed_window_right(
     array_kmer_set, border_kmer_list, boundary_size, offset, verbose, step_size=100
 ):
-    steps = math.ceil(boundary_size / step_size)
-    threshold = math.ceil(step_size / 4)
-    last_nonzero_step = 0
+    chunk_count = max(1, int(step_size))
+    chunk_size = max(1, math.ceil(boundary_size / chunk_count))
+    threshold = math.ceil(chunk_size / 4)
+    last_nonzero_step = None
 
     shared_counts = []
     counter = 0
-    for i in range(step_size):
-        start_idx = i * steps
-        end_idx = min((i + 1) * steps, len(border_kmer_list))
-        border_chunk_set = set(border_kmer_list[start_idx:end_idx])
-        shared_count = len(array_kmer_set & border_chunk_set)
+    for i in range(chunk_count):
+        start_idx = i * chunk_size
+        end_idx = min((i + 1) * chunk_size, len(border_kmer_list))
+        border_chunk = border_kmer_list[start_idx:end_idx]
+        shared_count = sum(kmer in array_kmer_set for kmer in border_chunk)
         shared_counts.append((i, shared_count))
 
         if shared_count > threshold and counter < 10:
@@ -811,45 +973,33 @@ def find_target_fixed_window_right(
         else:
             counter += 1
 
-    # Normalize for plotting
-    max_count = max(count for _, count in shared_counts) or 1
     plot_height = 10  # match left-hand version
-    scaled_counts = [
-        (i, int((count / max_count) * plot_height)) for i, count in shared_counts
-    ]
 
-    if verbose:
-        print(
-            f"Find right boundary point from range {offset}-{offset + (steps * step_size)}\n"
+    show_histogram = (
+        verbose
+        and last_nonzero_step is not None
+        and 1 < last_nonzero_step < chunk_count - 1
+    )
+    if show_histogram:
+        graph_columns, max_count = boundary_graph_columns(
+            shared_counts, last_nonzero_step, plot_height
         )
-
         for y in range(plot_height, -1, -1):
             line = f"{str(int(y * max_count / plot_height)).rjust(4)} | "
-            for idx, height in scaled_counts:
+            for contains_stop, height in graph_columns:
                 if height >= y:
-                    # Highlight the boundary stop position with '|'
-                    if idx == last_nonzero_step:
-                        line += "|"
-                    else:
-                        line += "#"
+                    line += "|" if contains_stop else "#"
                 else:
                     line += " "
             print(line)
 
         # X-axis line
-        axis_line = "     " + "-" * step_size
+        graph_width = len(graph_columns)
+        axis_line = "     " + "-" * graph_width
         print(axis_line)
 
         # X-axis labels: leftmost and rightmost
-        left_label = str(offset)
-        right_label = str(offset + (steps * step_size))
-        spacing = step_size - len(left_label) - len(right_label)
-        label_line = "     " + left_label + (" " * spacing) + right_label
-        print(label_line)
-
-        print(
-            f"\nBoundary stop index: {last_nonzero_step}, {offset + (step_size * last_nonzero_step)}\n"
-        )
+        print(boundary_graph_label_line(offset, boundary_size, graph_width))
 
     return last_nonzero_step
 
@@ -857,23 +1007,30 @@ def find_target_fixed_window_right(
 def find_last_matching_index(
     border_kmer_list, array_kmer_set, border_array_start, border_array_end
 ):
-    try:
-        for i in range(border_array_end - 1, border_array_start - 1, -1):
-            kmer = border_kmer_list[i]
-            if kmer in array_kmer_set:
-                return i
-    except IndexError:
-        # TODO FIX!!
-        # print("IndexError: border_array_start or border_array_end is out of bounds.")
-        # If we hit an index error, we can assume the border array start is the best estimate
-        # This is a fallback to ensure we return a valid index
-        # print(f"Returning border_array_start: {border_array_start},{border_array_end}")
-        pass
-    return border_array_start
+    start = max(0, min(int(border_array_start), len(border_kmer_list)))
+    end = max(start, min(int(border_array_end), len(border_kmer_list)))
+    for i in range(end - 1, start - 1, -1):
+        if border_kmer_list[i] in array_kmer_set:
+            return i
+    return start
+
+
+def candidates_share_band_border(current_end, next_start, band, tolerance):
+    """Return True only when adjacent candidates touch the same band edge."""
+    if band <= 0:
+        return False
+    boundary = round(current_end / band) * band
+    if boundary <= 0:
+        return False
+    return (
+        abs(current_end - boundary) <= tolerance
+        and abs(next_start - boundary) <= tolerance
+        and next_start >= current_end - tolerance
+    )
 
 
 def report_borders(
-    fa: str,
+    fa,
     seq_id: str,
     seq_len: int,
     band: int,
@@ -884,12 +1041,17 @@ def report_borders(
     classify: "str | bool",
     verbose: bool,
     quiet: bool,
+    sequence_hashes=None,
+    candidate_windows=None,
+    candidate_matrix_support=None,
 ) -> None:
     """
     Infer satellite locations & precise boundaries for regions described in `df`.
     """
-    # Convert band (in millions) to base-pairs
-    band = int(band) * 1_000_000
+    # Convert band (in millions) to base-pairs without truncating sub-Mbp bands.
+    band = int(float(band) * 1_000_000)
+    if band <= 0:
+        raise ValueError("band must be greater than zero")
 
     if not quiet:
         print(f"Inferring satellite locations & boundaries for {seq_id}...\n")
@@ -915,8 +1077,12 @@ def report_borders(
 
     if verbose:
         print("\n")
+        displayed_windows = sorted(
+            set([window] if candidate_windows is None else candidate_windows)
+        )
         print(
-            f"Processing {seq_id} boundaries with window size {window} and k-mer size {k}:\n"
+            f"Processing {seq_id} boundaries with window size(s) "
+            f"{', '.join(map(str, displayed_windows))} and k-mer size {k}:\n"
         )
 
     # Prepare starts/ends relative to the provided offset
@@ -926,6 +1092,24 @@ def report_borders(
     # Ensure non-negative
     starts = [s if s > 0 else 0 for s in starts]
     ends = [e if e > 0 else 0 for e in ends]
+    if candidate_windows is None:
+        refinement_windows = [window] * len(starts)
+    else:
+        refinement_windows = [int(value) for value in candidate_windows]
+        if len(refinement_windows) != len(starts):
+            raise ValueError(
+                "candidate_windows must contain one value for every candidate"
+            )
+        if any(value <= 0 for value in refinement_windows):
+            raise ValueError("candidate window sizes must be positive")
+    if candidate_matrix_support is None:
+        strong_matrix_evidence = [False] * len(starts)
+    else:
+        strong_matrix_evidence = [bool(value) for value in candidate_matrix_support]
+        if len(strong_matrix_evidence) != len(starts):
+            raise ValueError(
+                "candidate_matrix_support must contain one value for every candidate"
+            )
 
     new_starts = []
     new_ends = []
@@ -937,96 +1121,84 @@ def report_borders(
 
     assert len(starts) == len(ends)
 
+    def append_result(result):
+        start, end, name, prism_result = result
+        if prism_result is None or len(prism_result) < 4:
+            raise ValueError("Boundary result is missing repeat metadata")
+        start = int(start)
+        end = int(end)
+        monomer_value = prism_result[0]
+        if not has_valid_ntr_monomer(prism_result):
+            raise ValueError("Boundary result has no valid NTRPrism monomer")
+        periodicity_value = prism_result[2]
+        hor_value = bool(prism_result[1])
+        new_starts.append(start)
+        new_ends.append(end)
+        classification.append(name)
+        monomer.append(monomer_value)
+        periodicity.append(periodicity_value)
+        hor.append(hor_value)
+        previous_new_boundaries.append((start, end))
+
     i = 0
     while i < len(starts):
         next_i = i + 1
-        potential = ends[i] % band
         previous_coordinates = (
             previous_new_boundaries[-1] if previous_new_boundaries else (0, 1)
         )
+        coordinates = (int(starts[i]) + 1, int(ends[i]) + 1)
+        refinement_window = refinement_windows[i]
+        candidate_has_strong_matrix_evidence = strong_matrix_evidence[i]
 
-        # Band-border / wrap-around handling
-        # This code runs when the satellite boundary is by a band border
-        if potential <= window * 3 or potential >= band - (window * 3):
-            if verbose:
-                print(f"Estimated borders cross a border region: {ends[i]+1}\n")
-            if next_i < len(starts):
-                # merge with next region
-                ends[i] = ends[next_i]
-                del starts[next_i]
-                del ends[next_i]
+        if next_i < len(starts) and candidates_share_band_border(
+            current_end=ends[i],
+            next_start=starts[next_i],
+            band=band,
+            tolerance=max(refinement_window, refinement_windows[next_i]) * 3,
+        ):
+            coordinates = (coordinates[0], int(ends[next_i]) + 1)
+            refinement_window = min(refinement_window, refinement_windows[next_i])
+            candidate_has_strong_matrix_evidence = (
+                candidate_has_strong_matrix_evidence or strong_matrix_evidence[next_i]
+            )
+            del starts[next_i]
+            del ends[next_i]
+            del refinement_windows[next_i]
+            del strong_matrix_evidence[next_i]
 
-            coordinates = (int(starts[i]) + 1, int(ends[i]) + 1)
-            try:
-                updated_boundaries = detect_precise_boundaries(
-                    fasta_file=fa,
-                    seq_id=seq_id,
-                    seq_len=seq_len,
-                    window=window,
-                    k=k,
-                    coordinates=coordinates,
-                    verbose=verbose,
-                    classify=supersets_dict,
-                    previous_coordinates=previous_coordinates,
-                )
-                if verbose:
-                    print(
-                        f"Estimated new boundaries: {updated_boundaries[0]}-{updated_boundaries[1]}"
-                    )
-                # Various appendages
-                new_starts.append(updated_boundaries[0])
-                new_ends.append(updated_boundaries[1])
-                classification.append(updated_boundaries[2])
-                monomer.append(updated_boundaries[3][0])
-                periodicity.append(updated_boundaries[3][2])
-                hor.append(updated_boundaries[3][3])
-                previous_new_boundaries.append(
-                    (updated_boundaries[0], updated_boundaries[1])
-                )
-            except Exception as e:
-                if verbose:
-                    print(
-                        f"Error occurred while updating boundaries at {coordinates} (merged border region): {e}"
-                    )
-            # Do not increment i, as the next region is now at the same index
+        if verbose:
+            print("\n" + "=" * BOUNDARY_GRAPH_MAX_WIDTH)
+            print(
+                "Analyzing candidate: "
+                f"left boundary={coordinates[0]}, right boundary={coordinates[1]}"
+            )
 
-        # This code runs if not by a band border
-        else:
-            coordinates = (int(starts[i]) + 1, int(ends[i]) + 1)
-            try:
-                updated_boundaries = detect_precise_boundaries(
-                    fasta_file=fa,
-                    seq_id=seq_id,
-                    seq_len=seq_len,
-                    window=window,
-                    k=k,
-                    coordinates=coordinates,
-                    verbose=verbose,
-                    classify=supersets_dict,
-                    previous_coordinates=previous_coordinates,
+        try:
+            updated_boundaries = detect_precise_boundaries(
+                fasta_file=fa,
+                seq_id=seq_id,
+                seq_len=seq_len,
+                window=refinement_window,
+                k=k,
+                coordinates=coordinates,
+                verbose=verbose,
+                classify=supersets_dict,
+                previous_coordinates=previous_coordinates,
+                sequence_hashes=sequence_hashes,
+                strong_matrix_evidence=candidate_has_strong_matrix_evidence,
+            )
+            # A None result is an intentional ntr_prism rejection, not an
+            # extension error, so it remains excluded.
+            if updated_boundaries is None:
+                i += 1
+                continue
+            append_result(updated_boundaries)
+        except Exception as error:
+            if not quiet:
+                print(
+                    f"Removed candidate {coordinates[0]}-{coordinates[1]}: "
+                    f"boundary refinement failed ({error})."
                 )
-                if verbose:
-                    print(
-                        f"Estimated new boundaries: {updated_boundaries[0]}-{updated_boundaries[1]}"
-                    )
-                # Various appendages
-                new_starts.append(updated_boundaries[0])
-                new_ends.append(updated_boundaries[1])
-                classification.append(updated_boundaries[2])
-                monomer.append(updated_boundaries[3][0])
-                periodicity.append(updated_boundaries[3][2])
-                hor.append(updated_boundaries[3][3])
-                previous_new_boundaries.append(
-                    (updated_boundaries[0], updated_boundaries[1])
-                )
-            except Exception as e:
-                if verbose:
-                    print(
-                        f"Error occurred while updating boundaries at {coordinates} (non-border region): {e}"
-                    )
-
-            if verbose:
-                print("--------------------------------------------------\n")
 
         i += 1
 

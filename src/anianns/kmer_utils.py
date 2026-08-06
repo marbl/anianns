@@ -1,9 +1,31 @@
 import mmh3
 import pysam
+from alive_progress import alive_it
+import sys
 from typing import Iterable, List, Sequence
 import numpy as np
+from numba import njit, types
+from numba.typed import Dict as NumbaDict
 
 tab_b = bytes.maketrans(b"ACTG", b"TGAC")
+
+
+@njit(cache=True)
+def calculate_hash_distances(hashes):
+    """Return distances between consecutive occurrences of each hash."""
+    last_indices = NumbaDict.empty(
+        key_type=types.int32,
+        value_type=types.int64,
+    )
+    distances = np.empty(len(hashes), dtype=np.int64)
+    distance_count = 0
+    for index in range(len(hashes)):
+        value = hashes[index]
+        if value in last_indices:
+            distances[distance_count] = index - last_indices[value]
+            distance_count += 1
+        last_indices[value] = index
+    return distances[:distance_count].copy()
 
 
 def _progress_settings(n: int, k: int):
@@ -30,33 +52,102 @@ def convert_set_list_to_sorted_arrays(set_list):
     return [np.array(sorted(s), dtype=np.int32) for s in set_list]
 
 
-def build_kmer_sets(kmer_list, max_len, window, interval, prepend=None):
+@njit(cache=True)
+def _selected_unique(values, selected, start, end):
+    """Return sorted unique selected values from one positional slice."""
+    start = max(0, start)
+    end = min(end, len(values))
+    count = 0
+    for index in range(start, end):
+        if selected[index]:
+            count += 1
+
+    result = np.empty(count, dtype=np.int32)
+    output_index = 0
+    for index in range(start, end):
+        if selected[index]:
+            result[output_index] = values[index]
+            output_index += 1
+
+    if count <= 1:
+        return result
+
+    result.sort()
+    unique_count = 1
+    for index in range(1, count):
+        if result[index] != result[unique_count - 1]:
+            result[unique_count] = result[index]
+            unique_count += 1
+    return result[:unique_count].copy()
+
+
+@njit(cache=True)
+def _build_kmer_sets(values, selected, max_len, window, interval):
     non_sets = []
     overlap_sets = []
-
-    for i in range(max_len - 1):
-        start = i * window
+    for index in range(max_len - 1):
+        start = index * window
         end = start + window
-        ostart = max(0, start - interval)
-        oend = end + interval
-
-        # non-overlap slice (prepend only on the very first window if requested)
-        if prepend is not None and ostart == 0:
-            seq_non = prepend + kmer_list[start:end]
-        else:
-            seq_non = kmer_list[start:end]
-
-        # build your sets in one pass each, remove 0 k-mers
-        non_sets.append({x for x in seq_non if x % 4 == 0 and x != 0})
+        overlap_start = max(0, start - interval)
+        overlap_end = end + interval
+        non_sets.append(_selected_unique(values, selected, start, end))
         overlap_sets.append(
-            {x for x in kmer_list[ostart:oend] if x % 4 == 0 and x != 0}
+            _selected_unique(values, selected, overlap_start, overlap_end)
+        )
+    return overlap_sets, non_sets
+
+
+def build_kmer_sets(kmer_list, max_len, window, interval, prepend=None, sketch=4):
+    """Build sorted window sketches after computing the modulo mask once."""
+    if sketch not in (2, 4):
+        raise ValueError("sketch must be either 2 or 4")
+
+    values = np.asarray(kmer_list, dtype=np.int32)
+    selected = (values != 0) & (values % sketch == 0)
+    overlap_sets, non_sets = _build_kmer_sets(
+        values, selected, max_len, window, interval
+    )
+
+    if prepend is not None and non_sets:
+        prepend_values = np.asarray(prepend, dtype=np.int32)
+        prepend_values = prepend_values[
+            (prepend_values != 0) & (prepend_values % sketch == 0)
+        ]
+        non_sets[0] = np.unique(np.concatenate((prepend_values, non_sets[0]))).astype(
+            np.int32, copy=False
         )
 
-    # return exactly as before (overlap first, then non-overlap)
-    return (
-        convert_set_list_to_sorted_arrays(overlap_sets),
-        convert_set_list_to_sorted_arrays(non_sets),
-    )
+    return overlap_sets, non_sets
+
+
+def build_kmer_sets_multi(kmer_list, window_configs, sketch=4):
+    """Build several window resolutions while calculating the sketch mask once.
+
+    ``window_configs`` maps each window size to
+    ``(hash_count, max_len, interval)``. All views must be prefixes of the
+    supplied shared band hashes.
+    """
+    if sketch not in (2, 4):
+        raise ValueError("sketch must be either 2 or 4")
+
+    values = np.asarray(kmer_list, dtype=np.int32)
+    selected = (values != 0) & (values % sketch == 0)
+    results = {}
+    for window, (hash_count, max_len, interval) in window_configs.items():
+        hash_count = int(hash_count)
+        if hash_count < 0 or hash_count > len(values):
+            raise ValueError(
+                f"window {window} requested {hash_count} hashes from a "
+                f"{len(values)}-hash band"
+            )
+        results[int(window)] = _build_kmer_sets(
+            values[:hash_count],
+            selected[:hash_count],
+            int(max_len),
+            int(window),
+            int(interval),
+        )
+    return results
 
 
 def read_sequence_kmers_from_file(
@@ -80,29 +171,21 @@ def read_sequence_kmers_from_file(
 
 def generate_kmers_from_fasta(seq: Sequence[str], k: int, quiet: bool) -> Iterable[int]:
     n = len(seq)
-    total_kmers, progress_thresholds = _progress_settings(n, k)
+    total_kmers, _progress_thresholds = _progress_settings(n, k)
     if total_kmers <= 0:
         return
+    indices = range(total_kmers)
     if not quiet:
-        print_progress_bar(
-            0, total_kmers, prefix="Progress:", suffix="Complete", length=40
+        indices = alive_it(
+            indices,
+            title="Hashing k-mers",
+            unit=" k-mer",
+            enrich_print=False,
+            file=sys.stdout,
         )
 
     bases_to_remove = ["R", "Y", "M", "K", "S", "W", "H", "B", "V", "D", "N"]
-    for i in range(total_kmers):
-        if not quiet:
-            if i % progress_thresholds == 0:
-                print_progress_bar(
-                    i, total_kmers, prefix="Progress:", suffix="Complete", length=40
-                )
-            if i == total_kmers - 1:
-                print_progress_bar(
-                    total_kmers,
-                    total_kmers,
-                    prefix="Progress:",
-                    suffix="Completed",
-                    length=40,
-                )
+    for i in indices:
         # Remove case sensitivity
         kmer = seq[i : i + k].upper()
         # Skip kmer if it contains any ambiguous base
@@ -122,28 +205,20 @@ def generate_kmers_from_fasta_forward_only(
     seq: Sequence[str], k: int, quiet: bool
 ) -> Iterable[int]:
     n = len(seq)
-    total_kmers, progress_thresholds = _progress_settings(n, k)
+    total_kmers, _progress_thresholds = _progress_settings(n, k)
     if total_kmers <= 0:
         return
+    indices = range(total_kmers)
     if not quiet:
-        print_progress_bar(
-            0, total_kmers, prefix="Progress:", suffix="Complete", length=40
+        indices = alive_it(
+            indices,
+            title="Hashing forward k-mers",
+            unit=" k-mer",
+            enrich_print=False,
+            file=sys.stdout,
         )
 
-    for i in range(total_kmers):
-        if not quiet:
-            if i % progress_thresholds == 0:
-                print_progress_bar(
-                    i, total_kmers, prefix="Progress:", suffix="Complete", length=40
-                )
-            if i == total_kmers - 1:
-                print_progress_bar(
-                    total_kmers,
-                    total_kmers,
-                    prefix="Progress:",
-                    suffix="Completed",
-                    length=40,
-                )
+    for i in indices:
         # Remove case sensitivity
         kmer = seq[i : i + k].upper()
         fh = mmh3.hash(kmer, seed=42)
@@ -155,49 +230,22 @@ def generate_kmers_from_fasta_reverse_only(
     seq: Sequence[str], k: int, quiet: bool
 ) -> Iterable[int]:
     n = len(seq)
-    total_kmers, progress_thresholds = _progress_settings(n, k)
+    total_kmers, _progress_thresholds = _progress_settings(n, k)
     if total_kmers <= 0:
         return
+    indices = range(total_kmers)
     if not quiet:
-        print_progress_bar(
-            0, total_kmers, prefix="Progress:", suffix="Complete", length=40
+        indices = alive_it(
+            indices,
+            title="Hashing reverse k-mers",
+            unit=" k-mer",
+            enrich_print=False,
+            file=sys.stdout,
         )
 
-    for i in range(total_kmers):
-        if not quiet:
-            if i % progress_thresholds == 0:
-                print_progress_bar(
-                    i, total_kmers, prefix="Progress:", suffix="Complete", length=40
-                )
-            if i == total_kmers - 1:
-                print_progress_bar(
-                    total_kmers,
-                    total_kmers,
-                    prefix="Progress:",
-                    suffix="Completed",
-                    length=40,
-                )
+    for i in indices:
         # Remove case sensitivity
         kmer = seq[i : i + k].upper()
         rc = mmh3.hash(kmer[::-1].translate(tab_b), seed=42)
 
         yield rc
-
-
-def print_progress_bar(
-    iteration,
-    total,
-    prefix="",
-    suffix="",
-    decimals=1,
-    length=100,
-    fill="█",
-    printEnd="\r",
-):
-    percent = f"{100 * (iteration / total):.{decimals}f}"
-    filledLength = int(length * iteration // total)
-    bar = [fill] * filledLength + ["-"] * (length - filledLength)
-    bar_str = "".join(bar)
-    print(f"\r{prefix} |{bar_str}| {percent}% {suffix}", end=printEnd)
-    if iteration == total:
-        print()

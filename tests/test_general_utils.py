@@ -8,6 +8,7 @@ from anianns.general_utils import (
     add_prefix_to_tuples,
     calculate_distances,
     check_bed_vs_indexed_fasta,
+    clean_genomic_ticks,
     convert_dataframe_format,
     define_bounds,
     extract_histograms_by_name,
@@ -21,6 +22,10 @@ from anianns.general_utils import (
     validate_json,
     write_summary_file,
 )
+
+
+def test_clean_genomic_ticks_uses_band_coordinates_and_readable_steps():
+    assert clean_genomic_ticks(2.0, 4.0).tolist() == [2.0, 2.5, 3.0, 3.5, 4.0]
 
 
 @pytest.fixture
@@ -63,20 +68,54 @@ def test_check_bed_vs_indexed_fasta(monkeypatch, capsys):
 
 def test_convert_dataframe_format_supports_multiple_targets(bed_like_df):
     gtf = convert_dataframe_format(bed_like_df, "gtf")
-    assert "converted\texon" in gtf
-    assert "alpha" in gtf
+    first_gtf = gtf.splitlines()[0].split("\t")
+    assert first_gtf[:5] == ["chr1", "AniAnns", "tandem_repeat", "11", "15"]
+    assert first_gtf[5:8] == [".", ".", "."]
+    assert 'gene_id "anianns_000001";' in first_gtf[8]
+    assert 'repeat_name "alpha";' in first_gtf[8]
+    assert 'monomer_length "0";' in first_gtf[8]
 
     gff = convert_dataframe_format(bed_like_df, "gff")
-    assert "ID=beta" in gff
+    assert gff.startswith("##gff-version 3\n")
+    assert "ID=anianns_000002;Name=beta;monomer_length=1" in gff
 
     csv_output = convert_dataframe_format(bed_like_df, "csv")
     assert "chrom,start,end,name" in csv_output
+
+    tsv_output = convert_dataframe_format(bed_like_df, "tsv")
+    assert "chrom\tstart\tend\tname" in tsv_output
 
     json_output = convert_dataframe_format(bed_like_df, "json")
     assert '"chrom":"chr1"' in json_output
 
     with pytest.raises(ValueError):
         convert_dataframe_format(bed_like_df, "xlsx")
+
+
+def test_convert_dataframe_format_accepts_final_bed_chrom_column():
+    output = convert_dataframe_format(
+        pl.DataFrame(
+            {
+                "#chrom": ["chr2_hap1"],
+                "start": [666461],
+                "end": [687827],
+                "name": [None],
+                "score": [37],
+                "strand": ["."],
+            }
+        ),
+        "gtf",
+    )
+
+    fields = output.rstrip("\n").split("\t")
+    assert fields[:5] == [
+        "chr2_hap1",
+        "AniAnns",
+        "tandem_repeat",
+        "666462",
+        "687827",
+    ]
+    assert 'repeat_name "Unclassified Repeat";' in fields[8]
 
 
 def test_define_bounds_parses_supported_identifiers():
@@ -103,7 +142,9 @@ def test_extract_region_returns_sequence_and_handles_errors(monkeypatch, capsys)
         def close(self):
             return None
 
-    monkeypatch.setattr("anianns.general_utils.pysam.FastaFile", lambda path: FakeFasta())
+    monkeypatch.setattr(
+        "anianns.general_utils.pysam.FastaFile", lambda path: FakeFasta()
+    )
     assert extract_region("fake.fa", "chr1", 0, 10) == "chr1:1-10"
 
     def raise_error(path):
@@ -112,6 +153,22 @@ def test_extract_region_returns_sequence_and_handles_errors(monkeypatch, capsys)
     monkeypatch.setattr("anianns.general_utils.pysam.FastaFile", raise_error)
     assert extract_region("fake.fa", "chr1", 1, 10) is None
     assert "Error fetching region" in capsys.readouterr().out
+
+
+def test_extract_region_reuses_an_open_fasta_without_closing_it():
+    class OpenFasta:
+        def __init__(self):
+            self.closed = False
+
+        def fetch(self, chrom, start, end):
+            return f"{chrom}:{start}-{end}"
+
+        def close(self):
+            self.closed = True
+
+    fasta = OpenFasta()
+    assert extract_region(fasta, "chr1", 1, 10) == "chr1:1-10"
+    assert fasta.closed is False
 
 
 def test_extract_regions_and_histograms_by_name(monkeypatch):
@@ -138,7 +195,9 @@ def test_extract_regions_and_histograms_by_name(monkeypatch):
         "anianns.general_utils.generate_kmers_from_fasta_forward_only",
         lambda seq, k, quiet: iter([9, 1, 9, 1, 9]),
     )
-    monkeypatch.setattr("anianns.general_utils.top_n_frequent_distances", lambda values, n: [(2, 3)])
+    monkeypatch.setattr(
+        "anianns.general_utils.top_n_frequent_distances", lambda values, n: [(2, 3)]
+    )
 
     regions = extract_regions_by_name(df, ["one.fa", "two.fa"], k=4, verbose=False)
     histograms = extract_histograms_by_name(df, "one.fa", k=4, verbose=False)
@@ -168,7 +227,7 @@ def test_get_fasta_indexed_chroms_and_headers(monkeypatch, capsys):
     assert "Failed to open or index FASTA file" in capsys.readouterr().out
 
 
-def test_plot_matrix_validates_inputs(monkeypatch):
+def test_plot_matrix_validates_inputs(monkeypatch, tmp_path):
     monkeypatch.setattr("anianns.general_utils.plt.show", lambda: None)
 
     with pytest.raises(TypeError):
@@ -177,16 +236,68 @@ def test_plot_matrix_validates_inputs(monkeypatch):
     with pytest.raises(ValueError):
         plot_matrix(pl.Series("x", [1, 2]).to_numpy())
 
+    with pytest.raises(ValueError, match="overlay must match"):
+        plot_matrix(
+            pl.DataFrame([[1, 2], [3, 4]]).to_numpy(),
+            edge_overlay=pl.DataFrame([[True]]).to_numpy(),
+        )
+
+    with pytest.raises(ValueError, match="requires a Sobel"):
+        plot_matrix(
+            pl.DataFrame([[1, 2], [3, 4]]).to_numpy(),
+            edge_only=True,
+        )
+
     plot_matrix(pl.DataFrame([[1, 2], [3, 4]]).to_numpy(), show_colorbar=False)
+
+    save_path = tmp_path / "heatmap.png"
+    monkeypatch.setattr(
+        "anianns.general_utils.plt.show",
+        lambda: (_ for _ in ()).throw(AssertionError("interactive display used")),
+    )
+    plot_matrix(
+        pl.DataFrame([[86, 90], [95, 100]]).to_numpy(),
+        edge_overlay=pl.DataFrame([[True, False], [False, True]]).to_numpy(),
+        edge_only=True,
+        diagonal_ranges=[(0, 1)],
+        highlight_ranges=[(1, 2, 0, 1)],
+        show_colorbar=False,
+        dpi=36,
+        figsize=(2, 2),
+        save_path=save_path,
+    )
+    assert save_path.exists()
+
+
+def test_plot_matrix_can_place_overlay_legend_outside_axes(monkeypatch, tmp_path):
+    captured = {}
+    monkeypatch.setattr(
+        "anianns.general_utils.plt.close",
+        lambda figure: captured.setdefault("figure", figure),
+    )
+
+    plot_matrix(
+        pl.DataFrame([[0, 1], [1, 0]]).to_numpy(),
+        edge_overlay=pl.DataFrame([[True, False], [False, True]]).to_numpy(),
+        edge_only=True,
+        diagonal_ranges=[(0, 1)],
+        highlight_ranges=[(1, 2, 0, 1)],
+        legend_outside=True,
+        show_colorbar=False,
+        save_path=tmp_path / "outside-legend.png",
+    )
+
+    figure = captured["figure"]
+    assert figure.axes[0].get_legend() is None
+    assert len(figure.legends) == 1
+    labels = [text.get_text() for text in figure.legends[0].get_texts()]
+    assert labels == ["Sobel edges", "Detected satellite", "Distal link"]
 
 
 def test_read_bed_files_skips_headers_and_casts_coordinates(tmp_path):
     bed_path = tmp_path / "example.bed"
     bed_path.write_text(
-        "track name=test\n"
-        "# ignored\n"
-        "chr1\t10\t20\talpha\n"
-        "chr2\t30\t40\tbeta\n"
+        "track name=test\n" "# ignored\n" "chr1\t10\t20\talpha\n" "chr2\t30\t40\tbeta\n"
     )
 
     [df] = read_bed_files(str(bed_path))

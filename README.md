@@ -1,6 +1,6 @@
-![Release](https://img.shields.io/github/v/release/marbl/anianns?sort=semver&label=stable%20release)
-![Coverage](https://img.shields.io/codecov/c/github/marbl/anianns?label=coverage)
-![Black](https://img.shields.io/badge/code%20style-black-000000.svg)
+[![Tests](https://img.shields.io/github/actions/workflow/status/marbl/anianns/tests.yml?branch=main&label=tests)](https://github.com/marbl/anianns/actions/workflows/tests.yml)
+[![PyPI version](https://img.shields.io/pypi/v/anianns)](https://pypi.org/project/anianns/)
+[![Python versions](https://img.shields.io/pypi/pyversions/anianns)](https://pypi.org/project/anianns/)
 
 ![](images/anianns_logo.png)
 
@@ -71,7 +71,7 @@ Once installed, confirm _AniAnn's_ was installed correctly by running `python -m
  /_/   \_\_| |_|_|/_/   \_\_| |_|_| |_| |___/   :` .'._.'. `;
                                                 '-`'.___.'`-'
 
-usage: anianns [-h] {annotate,build_db} ...
+usage: anianns [-h] {annotate,build_db,ntrprism} ...
 
 Ani Ann's: ANI Inferred ANNotation of Tandem Repeats
 
@@ -122,6 +122,9 @@ Name of output directory. **Default: current working directory.**
 
 Output annotation file format. Options are BED, GTF, GFF, CSV, TSV, JSON. **Default: BED.**
 
+GTF and GFF output uses 1-based inclusive coordinates, `tandem_repeat` features,
+and includes the AniAnn's repeat name and inferred monomer length in the attributes.
+
 `-m / --mask <ALL>`
 
 Name or repeat length of satellite arrays to mask. Replaces deteced satellites with N's. See [Repeat Masking](#repeat-masking) for more info. **Default: None.**
@@ -148,11 +151,62 @@ Minimum sequence identity cutoff threshold when running ModDotPlot. While it is 
 
 `-w / --window <INT>`
 
-Dotplot window size, or the number of bp contained within each pixel in a plot. This is proportional to the sensitivity of satellite detection (ie. lower is more accurate, at the expense of runtime). **Default: 2000.**
+The central dotplot window size. AniAnn's automatically scans half, the supplied
+value, and double the supplied value. For example, `-w 5000` scans windows of
+2500, 5000, and 10000 bp. AniAnn's hashes each sequence band once, scans the
+additional resolutions without dense matrices, reconciles overlapping calls,
+and boundary-refines only the winning call at each locus. If the initial
+right-boundary range has no supported transition, refinement searches back to
+the left using k-mers observed at least three times in the candidate core. This
+prevents an unresolved call from defaulting to a matrix-band endpoint.
+Boundary refinement runs NTRPrism at both k=6 and the user-selected k-mer
+length. A significant k=6 result supplies the monomer estimate; the
+user-selected k-mer result is used only when k=6 rejects. If both reject,
+AniAnn's removes the candidate even when its matrix or distal signal is strong,
+so final annotations never use a monomer score below 3 bp as a fallback.
+Periodic rescues target long arrays whose repeat unit produces
+several regularly spaced lines parallel to the main diagonal rather than one
+solid diagonal block. AniAnn's scans a bounded set of diagonal lags without
+materializing a full matrix, requires at least three high-contrast harmonics
+with consistent row coverage, and independently confirms the inferred period
+with NTRPrism before adding the candidate. Broad dense blocks, isolated
+off-diagonal matches, and single parallel lines do not pass this rescue path.
+Comparable spans favor the finer resolution; a coarser call wins when it
+recovers materially more supported array sequence.
+**Default: 2000 (scans 1000, 2000, and 4000).**
 
 `--band <FLOAT>`
 
-Instead of creating a full NxN matrix (where N is sequence size), _AniAnn's_ uses a banded matrix to reduce runtime. The size of the band can be adjusted here (units in megabases). Increasing this amount will improve the detection of off-target satellite arrays, at the expense of runtime. **Default: 2.**
+_AniAnn's_ streams the sequence in bands of this many megabases. Normal
+annotation scans outward from the diagonal without materializing a full band
+matrix; `--plot` or `--distal` creates the primary-resolution matrix needed for
+visualization or distal-link detection. **Default: 2.**
+
+`--cache-dir <DIR>`
+
+Opt in to reusable canonical k-mer hashing. When the directory contains a
+matching cache for the FASTA sequence and k-mer size, AniAnn's loads it;
+otherwise AniAnn's creates the cache during the run. Without `--cache-dir`,
+hashes are streamed in memory and no disk cache is read or created.
+**Default: caching disabled.**
+
+`-j / --threads <INT>`
+
+Maximum total compute concurrency used by AniAnn's. By default, AniAnn's uses
+all threads available to its Numba runtime. During an uncached multi-band run,
+one worker is reserved for streaming k-mer hashes while the remaining workers
+run the matrix kernels. With `--threads 1`, hashing and matrix processing run
+synchronously so the limit is preserved. **Default: all available threads.**
+
+Distal annotation runs also write `satellite_dsu.tsv` and a human-readable
+`satellite_dsu.txt`; non-distal runs do not create either file. Each
+boundary-refined satellite is a DSU node, including unlinked singletons.
+Validated distal links union their two satellite nodes, so chains of distal
+relationships share one stable `component_id`; the table also reports
+component size and direct-link count. BED `itemRgb` values are shared only by
+satellites that have both the same DSU component and the same retained
+NTRPrism signature (monomer, periodicity, and HOR status). Missing NTRPrism
+monomers are not grouped by color.
 
 `--identifier <STR>`
 
@@ -160,15 +214,61 @@ Name of identifier. Used when no matches to a k-mer db are found, or if `--class
 
 `-p / --plot <bool>`
 
-Create a self-identity plot of each input sequence, in `--band` length segments. **Default: None.**
+Save two PNGs for every `--band` length matrix under
+`<output directory>/matrix_plots`; plots are not displayed interactively. The
+standard filename is a hollow, edge-only view: cyan intensity shows the
+normalized Sobel gradient response and green outlines show detected diagonal
+satellites. With `--distal`, distal link rectangles are also highlighted in
+red. The companion `_identity.png` file is a higher-resolution, inverted
+11-level Spectral ANI heatmap with an identity colorbar; values below the ANI
+cutoff are white, and it has no Sobel, satellite, distal, or annotation legend.
+Adjacent matrix pairs receive the same two views. Sobel
+is visualization-only and does not affect satellite or distal-link prediction.
+**Default: disabled.**
 
-`--verbose <bool>`
+`--distal`
 
-Verbose logging output. Creates a log file at `--directory`. **Default: None.**
+Detect distal-satellite links independently of whether plots are requested.
+Detected off-diagonal blocks are written to
+`<sequence>_distal_links.bedpe`, and used to link satellites in the DSU. A
+compact candidate-neighborhood matrix retaining two neighboring windows on
+either side of each candidate is used in memory and is not written to disk. An
+unmatched distal axis must pass NTR Prism and boundary refinement before it is
+added to BED/CSV or linked in the DSU. Strong distal support cannot rescue an
+endpoint rejected at both k values.
+Neighboring bands are bridged with bounded candidate-to-all comparisons in both
+directions plus a 50-window seam scan. With both `--distal --plot`, links are
+outlined in red. When the bridge finds evidence, a sparse
+two-band heatmap is saved under `matrix_pairs/`; adjacent pairs are then skipped
+by the final global comparison to avoid duplicate work.
+**Default: disabled.**
 
-`--quiet <bool>`
+`--verbose`
 
-Suppress all logging output. **Default: None.**
+Show stage timings, the number of potential candidates, concise acceptance or
+removal reasons for each boundary-refined candidate, and resolved boundary
+histograms. Per-matrix timing comparisons and unresolved extension histograms
+are omitted. Each candidate begins with a labeled separator, and every boundary
+histogram line is capped at 80 characters, including searches that resolve after
+extending the initial boundary range. **Default: disabled.**
+
+`--log`
+
+Write the verbose output to a timestamped file in the selected output directory
+while continuing to show it in the terminal. The filename records the local run
+date and time, for example
+`anianns_annotation_log_2026-08-04_14-37-52.txt`. This option implies
+`--verbose` and cannot be combined with `--quiet`. A distal run also writes a
+per-sequence `<sequence>_distal_summary.txt` containing the score, density, row
+coverage, column coverage, and hit count for every accepted distal satellite
+pair.
+**Default: disabled.**
+
+`--quiet`
+
+Suppress all stdout and stderr output, including the AniAnn's banner, sequence
+status, progress bars, warnings, and completion messages. Output files are
+still written normally. **Default: disabled.**
 
 #### Sample run
 
@@ -178,18 +278,19 @@ Upon running the above command, you should see the following output in `sample_h
 
 ```
 #chrom	start	end	name	score	strand	thickStart	thickEnd	itemRgb
-sample_hap1	67078	407613	147	.	67078	407613	230,57,70
-sample_hap1	634567	669509	5	.	634567	669509	42,157,143
-sample_hap1	669978	1148691	68	.	669978	1148691	241,196,15
-sample_hap1	1148878	1472729	5	.	1148878	1472729	42,157,143
-sample_hap1	1472778	2702615	42	.	1472778	2702615	138,43,226
-sample_hap1	2703054	2729531	68	.	2703054	2729531	241,196,15
-sample_hap1	2729678	2834698	5	.	2729678	2834698	42,157,143
-sample_hap1	3044365	3208742	147	.	3044365	3208742	230,57,70
-sample_hap1	3225177	3297021	48	.	3225177	3297021	30,144,255
+sample_hap1	67178	407613		147	.	67178	407613	31,119,180
+sample_hap1	458676	466557		64	.	458676	466557	174,199,232
+sample_hap1	634665	668075		5	.	634665	668075	255,127,14
+sample_hap1	670071	1148691		68	.	670071	1148691	255,187,120
+sample_hap1	1148878	1472729		5	.	1148878	1472729	44,160,44
+sample_hap1	1472878	2702615		42	.	1472878	2702615	152,223,138
+sample_hap1	2729748	2834698		5	.	2729748	2834698	214,39,40
+sample_hap1	3044478	3208742		147	.	3044478	3208742	255,152,150
+sample_hap1	3225278	3297085		48	.	3225278	3297085	148,103,189
+
 ```
 
-This is a BED file containing inferred satellite intervals. The value in the `score` column indicates the periodicity of the satellite array. Since no k-mer database was used, _AniAnn's_ does not attempt to classify each array. _AniAnn's_ will label arrays it determines to be related as the same color in `itemRgb`.
+This is a BED file containing inferred satellite intervals. The value in the `score` column indicates the periodicity of the satellite array. Since no k-mer database was used, _AniAnn's_ does not attempt to classify each array.
 
 To classify each line of the BED file into a known satellite array, a database of _k_-mers must be used. See [creating an annotation database](#creating-an-annotation-database) for more information. We will use the following provided _k_-mer db for our sample run:
 
@@ -197,18 +298,36 @@ To classify each line of the BED file into a known satellite array, a database o
 
 ```
 #chrom	start	end	name	score	strand	thickStart	thickEnd	itemRgb
-sample_hap1	67078	407613	ACRO	147	.	67078	407613	230,57,70
-sample_hap1	634567	669509	HSat3	5	.	634567	669509	42,157,143
-sample_hap1	669978	1148691	bSat	68	.	669978	1148691	241,196,15
-sample_hap1	1148878	1472729	HSat3	5	.	1148878	1472729	42,157,143
-sample_hap1	1472778	2702615	HSat1A	42	.	1472778	2702615	138,43,226
-sample_hap1	2703054	2729531	bSat	68	.	2703054	2729531	241,196,15
-sample_hap1	2729678	2834698	HSat3	5	.	2729678	2834698	42,157,143
-sample_hap1	3044365	3208742	ACRO	147	.	3044365	3208742	230,57,70
-sample_hap1	3225177	3297021	CER	48	.	3225177	3297021	30,144,255
+sample_hap1	67178	407613	ACRO	147	.	67178	407613	31,119,180
+sample_hap1	458676	466557	Walusat	64	.	458676	466557	174,199,232
+sample_hap1	634665	668075	HSat3	5	.	634665	668075	255,127,14
+sample_hap1	670071	1148691	bSat	68	.	670071	1148691	255,187,120
+sample_hap1	1148878	1472729	HSat3	5	.	1148878	1472729	255,127,14
+sample_hap1	1472878	2702615	HSat1A	42	.	1472878	2702615	152,223,138
+sample_hap1	2729748	2834698	HSat3	5	.	2729748	2834698	255,127,14
+sample_hap1	3044478	3208742	ACRO	147	.	3044478	3208742	31,119,180
+sample_hap1	3225278	3297085	CER	48	.	3225278	3297085	148,103,189
 ```
 
-Note that you *must* use the default k-mer value as the classification database. The default _k_ = 21 
+Note that you *must* use the default k-mer value as the classification database. The default _k_ = 21. _AniAnn's_ will label arrays it determines to be related as the same color in `itemRgb`.
+
+For a more thorough analysis of the region, run `anianns -f sample_sequences/sample_hap1_.fa --distal`
+
+To visualize the matrix evidence behind the annotations, add `--plot`:
+
+`anianns annotate -f sample_sequences/sample_hap1.fa -d sample_hap1_plots --plot`
+
+This saves an annotated Sobel view and a high-resolution spectral identity view
+for each sequence band under `sample_hap1_plots/matrix_plots`. Satellite
+intervals and Sobel edges are labeled on the annotated view, with its legend
+placed outside the matrix. Combining `--plot` with `--distal` also outlines
+supported distal matches and saves any adjacent-band views under
+`matrix_pairs`.
+
+![](images/sample_hap1_matrices_0001_0002_identity.png)
+
+![](images/sample_hap1_matrices_0001_0002.png)
+
 
 #### Repeat Masking
 
@@ -298,7 +417,41 @@ Creating a *k*-mer db for HG002 using the provided config file takes around 3 mi
 
 ### NTRPrism
 
-Feature coming soon!
+NTRPrism reports the most common distances between consecutive occurrences of
+the same forward k-mer in one FASTA region. Nearby spacing values are combined
+before ranking and plotting, so values such as 170 and 171 bp contribute to the
+same peak by default.
+
+```bash
+anianns ntrprism \
+  -f assembly.fa.gz \
+  -s chr1_MATERNAL \
+  -r 120000000 121000000 \
+  -k 6
+```
+
+The region uses 0-based, half-open coordinates. By default, the command prints
+the ten strongest merged spacing peaks, each peak's count as a percentage of
+the requested interval, and a horizontal ASCII histogram. It does not create
+files unless `--save` is supplied:
+
+```bash
+anianns ntrprism \
+  -f assembly.fa.gz \
+  -s chr1_MATERNAL \
+  -r 120000000 121000000 \
+  -k 11 \
+  --save \
+  -d chr1_ntrprism
+```
+
+With `--save`, AniAnn's also writes a top-ten text report and a PNG histogram.
+The `-k / --kmer` option controls the k-mer length and defaults to 21, matching
+the annotation pipeline. The
+default nearby-value merge distance is 1 bp; use `--merge-distance` to change
+it. Use `--quiet --save` for files without the terminal report. Missing or
+unreadable FASTA files, unknown sequence IDs, invalid ranges, and regions
+shorter than the selected k-mer size produce an error and a nonzero exit status.
 
 ## Questions
 

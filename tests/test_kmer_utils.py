@@ -3,11 +3,12 @@ import numpy as np
 
 from anianns.kmer_utils import (
     build_kmer_sets,
+    build_kmer_sets_multi,
+    calculate_hash_distances,
     convert_set_list_to_sorted_arrays,
     generate_kmers_from_fasta,
     generate_kmers_from_fasta_forward_only,
     generate_kmers_from_fasta_reverse_only,
-    print_progress_bar,
     read_sequence_kmers_from_file,
     remove_ambiguous_bases,
 )
@@ -21,6 +22,11 @@ def test_remove_ambiguous_bases_filters_known_homopolymers():
 
     assert keep in cleaned
     assert drop not in cleaned
+
+
+def test_compiled_hash_distances_match_consecutive_occurrences():
+    hashes = np.array([5, 7, 5, 5, 7, 9], dtype=np.int32)
+    assert calculate_hash_distances(hashes).tolist() == [2, 1, 3]
 
 
 def test_convert_set_list_to_sorted_arrays_preserves_sorted_values():
@@ -42,6 +48,40 @@ def test_build_kmer_sets_creates_overlap_and_non_overlap_windows():
     assert [arr.tolist() for arr in non_overlap] == [[4, 24], [8, 12]]
 
 
+def test_build_kmer_sets_supports_denser_modulo_two_sketches():
+    overlap, non_overlap = build_kmer_sets(
+        kmer_list=[0, 2, 4, 6, 8, 10],
+        max_len=3,
+        window=2,
+        interval=1,
+        sketch=2,
+    )
+
+    assert [arr.tolist() for arr in overlap] == [[2, 4], [2, 4, 6, 8]]
+    assert [arr.tolist() for arr in non_overlap] == [[2], [4, 6]]
+
+
+def test_multi_window_sets_match_independent_prefix_builds():
+    hashes = np.arange(0, 80, 4, dtype=np.int32)
+    configs = {
+        4: (14, 4, 2),
+        8: (20, 3, 4),
+    }
+
+    combined = build_kmer_sets_multi(hashes, configs, sketch=4)
+
+    for window, (hash_count, max_len, interval) in configs.items():
+        independent = build_kmer_sets(
+            hashes[:hash_count], max_len, window, interval, sketch=4
+        )
+        for combined_sets, independent_sets in zip(combined[window], independent):
+            assert len(combined_sets) == len(independent_sets)
+            assert all(
+                np.array_equal(left, right)
+                for left, right in zip(combined_sets, independent_sets)
+            )
+
+
 def test_generate_kmers_handles_reverse_complements_and_ambiguous_bases():
     seq = "ACTGN"
     kmers = list(generate_kmers_from_fasta(seq, k=4, quiet=True))
@@ -61,11 +101,6 @@ def test_forward_and_reverse_only_kmer_generators_hash_expected_strings():
     ]
 
 
-def test_print_progress_bar_writes_terminal_output(capsys):
-    print_progress_bar(5, 5, prefix="Progress:", suffix="Done", length=10)
-    assert "100.0% Done" in capsys.readouterr().out
-
-
 def test_kmer_generators_emit_progress_when_not_quiet(capsys):
     seq = "A" * 80
     forward = list(generate_kmers_from_fasta_forward_only(seq, 4, False))
@@ -73,7 +108,10 @@ def test_kmer_generators_emit_progress_when_not_quiet(capsys):
     canonical = list(generate_kmers_from_fasta(seq, 4, False))
 
     assert len(forward) == len(reverse) == len(canonical) == 77
-    assert "Completed" in capsys.readouterr().out
+    output = capsys.readouterr().out
+    assert "Hashing forward k-mers" in output
+    assert "Hashing reverse k-mers" in output
+    assert "Hashing k-mers" in output
 
 
 def test_kmer_generators_handle_short_sequences_with_progress_enabled(capsys):
@@ -84,7 +122,7 @@ def test_kmer_generators_handle_short_sequences_with_progress_enabled(capsys):
     canonical = list(generate_kmers_from_fasta(seq, 4, False))
 
     assert len(forward) == len(reverse) == len(canonical) == 2
-    assert "Completed" in capsys.readouterr().out
+    assert "Hashing k-mers" in capsys.readouterr().out
 
 
 def test_kmer_generators_return_empty_for_sequences_shorter_than_k():
@@ -103,6 +141,9 @@ def test_read_sequence_kmers_from_file_uses_fasta_fetch(monkeypatch):
             return "ACTGA"
 
     monkeypatch.setattr("anianns.kmer_utils.pysam.FastaFile", FakeFasta)
-    monkeypatch.setattr("anianns.kmer_utils.generate_kmers_from_fasta", lambda seq, ksize, quiet: [1, 2, 3])
+    monkeypatch.setattr(
+        "anianns.kmer_utils.generate_kmers_from_fasta",
+        lambda seq, ksize, quiet: [1, 2, 3],
+    )
 
     assert read_sequence_kmers_from_file("fake.fa", "chr1", 4, True) == [[1, 2, 3]]

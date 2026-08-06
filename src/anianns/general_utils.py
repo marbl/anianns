@@ -11,7 +11,34 @@ from collections import Counter
 import numpy as np
 import re
 import matplotlib.pyplot as plt
+from matplotlib.ticker import MaxNLocator
 import csv
+from io import StringIO
+from urllib.parse import quote
+
+plt.rcParams["font.family"] = "sans-serif"
+plt.rcParams["font.sans-serif"] = ["Helvetica", "Arial", "DejaVu Sans"]
+
+
+def clean_genomic_ticks(start, end, target_intervals=4):
+    """Return readable genomic tick values while retaining exact band edges."""
+    locator = MaxNLocator(
+        nbins=target_intervals,
+        steps=[1, 2, 2.5, 5, 10],
+    )
+    ticks = locator.tick_values(start, end)
+    tolerance = max(abs(end - start), 1.0) * 1e-9
+    ticks = ticks[(ticks >= start - tolerance) & (ticks <= end + tolerance)]
+    if ticks.size == 0 or not np.isclose(ticks[0], start):
+        ticks = np.insert(ticks, 0, start)
+    else:
+        ticks[0] = start
+    if not np.isclose(ticks[-1], end):
+        ticks = np.append(ticks, end)
+    else:
+        ticks[-1] = end
+    return ticks
+
 
 from anianns.kmer_utils import (
     generate_kmers_from_fasta,
@@ -83,43 +110,80 @@ def convert_dataframe_format(df: pl.DataFrame, format: str) -> str:
     """
     format = format.lower()
 
+    chrom_column = "chrom" if "chrom" in df.columns else "#chrom"
+    required = {chrom_column, "start", "end", "name", "score", "strand"}
+    missing = required.difference(df.columns)
+    if missing:
+        raise ValueError(
+            "Input annotation dataframe is missing required column(s): "
+            + ", ".join(sorted(missing))
+        )
+
+    def gtf_escape(value):
+        return (
+            str(value)
+            .replace("\\", "\\\\")
+            .replace('"', '\\"')
+            .replace("\t", " ")
+            .replace("\r", " ")
+            .replace("\n", " ")
+        )
+
     # --- BED → GTF conversion ---
     if format == "gtf":
-        # GTF columns: seqname, source, feature, start, end, score, strand, frame, attribute
-        gtf_df = df.select(
-            [
-                pl.col("chrom").alias("seqname"),
-                pl.lit("converted").alias("source"),
-                pl.lit("exon").alias("feature"),
-                pl.col("start"),
-                pl.col("end"),
-                pl.col("score"),
-                pl.col("strand"),
-                pl.lit(".").alias("frame"),
-                (
-                    pl.concat_str([pl.lit('gene_id "'), pl.col("name"), pl.lit('";')])
-                ).alias("attribute"),
-            ]
-        )
-        return gtf_df.write_csv(None, separator="\t", include_header=False)
+        output = StringIO()
+        for index, row in enumerate(df.iter_rows(named=True), start=1):
+            start, end = int(row["start"]), int(row["end"])
+            if end <= start:
+                continue
+            repeat_id = f"anianns_{index:06d}"
+            repeat_name = gtf_escape(row["name"] or "Unclassified Repeat")
+            monomer = "." if row["score"] is None else str(row["score"])
+            attributes = (
+                f'gene_id "{repeat_id}"; '
+                f'transcript_id "{repeat_id}"; '
+                f'repeat_name "{repeat_name}"; '
+                f'monomer_length "{gtf_escape(monomer)}";'
+            )
+            fields = (
+                row[chrom_column],
+                "AniAnns",
+                "tandem_repeat",
+                start + 1,
+                end,
+                ".",
+                row["strand"] or ".",
+                ".",
+                attributes,
+            )
+            output.write("\t".join(map(str, fields)) + "\n")
+        return output.getvalue()
 
     # --- BED → GFF conversion ---
     elif format == "gff":
-        # GFF columns: seqid, source, type, start, end, score, strand, phase, attributes
-        gff_df = df.select(
-            [
-                pl.col("chrom").alias("seqid"),
-                pl.lit("converted").alias("source"),
-                pl.lit("region").alias("type"),
-                pl.col("start"),
-                pl.col("end"),
-                pl.col("score"),
-                pl.col("strand"),
-                pl.lit(".").alias("phase"),
-                (pl.concat_str([pl.lit("ID="), pl.col("name")])).alias("attributes"),
-            ]
-        )
-        return gff_df.write_csv(None, separator="\t", include_header=False)
+        output = StringIO()
+        output.write("##gff-version 3\n")
+        for index, row in enumerate(df.iter_rows(named=True), start=1):
+            start, end = int(row["start"]), int(row["end"])
+            if end <= start:
+                continue
+            repeat_id = f"anianns_{index:06d}"
+            repeat_name = quote(str(row["name"] or "Unclassified Repeat"), safe="")
+            monomer = "." if row["score"] is None else quote(str(row["score"]), safe="")
+            attributes = f"ID={repeat_id};Name={repeat_name};monomer_length={monomer}"
+            fields = (
+                row[chrom_column],
+                "AniAnns",
+                "tandem_repeat",
+                start + 1,
+                end,
+                ".",
+                row["strand"] or ".",
+                ".",
+                attributes,
+            )
+            output.write("\t".join(map(str, fields)) + "\n")
+        return output.getvalue()
 
     # --- CSV ---
     elif format == "csv":
@@ -168,7 +232,7 @@ def extract_region(fasta_file, chr, region_start, region_end):
     Extract a sequence from a FASTA file using 1-based coordinates (inclusive).
 
     Args:
-        fasta_file (str): Path to the FASTA file (indexed with .fai).
+        fasta_file: Path to an indexed FASTA, or an open ``pysam.FastaFile``.
         chr (str): Chromosome or contig name.
         region_start (int): 1-based start coordinate.
         region_end (int): 1-based end coordinate (inclusive).
@@ -176,12 +240,17 @@ def extract_region(fasta_file, chr, region_start, region_end):
     Returns:
         str or None: Extracted DNA sequence, or None if an error occurred.
     """
+    fasta = None
+    owns_handle = False
     try:
         if region_start < 1:
             region_start = 1
-        fasta = pysam.FastaFile(fasta_file)
+        if hasattr(fasta_file, "fetch"):
+            fasta = fasta_file
+        else:
+            fasta = pysam.FastaFile(fasta_file)
+            owns_handle = True
         sequence = fasta.fetch(chr, region_start, region_end)
-        fasta.close()
         return sequence
     except Exception as e:
         print(
@@ -189,6 +258,9 @@ def extract_region(fasta_file, chr, region_start, region_end):
             f"Details: {e}\n"
         )
         return None
+    finally:
+        if owns_handle and fasta is not None:
+            fasta.close()
 
 
 def extract_regions_by_name(
@@ -361,6 +433,20 @@ def plot_matrix(
     save_path=None,
     offset=1.0,
     highlight_ranges=None,  # list of (xmin, xmax, ymin, ymax)
+    diagonal_ranges=None,  # list of (start, end)
+    edge_overlay=None,
+    edge_only=False,
+    colorbar_label="Value",
+    colorbar_pad=0.04,
+    reserve_colorbar_space=False,
+    coordinate_origin=None,
+    coordinate_end=None,
+    coordinate_units="bp",
+    white_below=None,
+    vmin=86,
+    vmax=100,
+    aspect="auto",
+    legend_outside=False,
 ):
     import numpy as np
     import matplotlib.pyplot as plt
@@ -370,25 +456,120 @@ def plot_matrix(
         raise TypeError("Input must be a NumPy array")
     if matrix.ndim != 2:
         raise ValueError("Input must be a 2D matrix")
+    if edge_overlay is not None:
+        edge_overlay = np.asarray(edge_overlay, dtype=np.float32)
+        if edge_overlay.shape != matrix.shape:
+            raise ValueError("Sobel edge overlay must match the matrix shape")
+        if not np.all(np.isfinite(edge_overlay)):
+            raise ValueError("Sobel edge overlay must contain finite values")
+        edge_overlay = np.clip(edge_overlay, 0.0, 1.0)
+    if edge_only and edge_overlay is None:
+        raise ValueError("edge-only plotting requires a Sobel edge overlay")
 
     fig, ax = plt.subplots(figsize=figsize, dpi=dpi)
 
-    im = ax.imshow(matrix, cmap=cmap, aspect="auto", vmin=86, interpolation="nearest")
+    if cmap == "spectral_11":
+        cmap = plt.get_cmap("Spectral", 11)
+    elif cmap == "spectral_11_r":
+        cmap = plt.get_cmap("Spectral_r", 11)
+
+    displayed_matrix = np.zeros_like(matrix) if edge_only else matrix
+    if white_below is not None:
+        displayed_matrix = np.ma.masked_less(displayed_matrix, white_below)
+        cmap = cmap.copy() if hasattr(cmap, "copy") else cmap
+        cmap.set_bad("white")
+    im = ax.imshow(
+        displayed_matrix,
+        cmap=cmap,
+        aspect=aspect,
+        vmin=vmin,
+        vmax=vmax,
+        interpolation="nearest",
+    )
+    if edge_overlay is not None and np.any(edge_overlay):
+        from matplotlib.colors import LinearSegmentedColormap
+
+        visible_edges = np.ma.masked_where(edge_overlay <= 0.05, edge_overlay)
+        edge_cmap = LinearSegmentedColormap.from_list(
+            "sobel_cyan",
+            [(0.0, 0.75, 1.0, 0.0), (0.0, 0.75, 1.0, 1.0)],
+        )
+        ax.imshow(
+            visible_edges,
+            cmap=edge_cmap,
+            aspect=aspect,
+            interpolation="nearest",
+            vmin=0,
+            vmax=1,
+            zorder=2,
+        )
+    if aspect == "equal":
+        ax.set_box_aspect(1)
 
     ax.set_title(title)
-    ax.set_xlabel("Columns")
-    ax.set_ylabel("Rows")
+    if coordinate_origin is None:
+        ax.set_xlabel("Columns")
+        ax.set_ylabel("Rows")
+    else:
+        axis_label = f"Genomic position ({coordinate_units})"
+        ax.set_xlabel(axis_label)
+        ax.set_ylabel(axis_label)
 
     # --- scale tick labels only ---
-    xticks = ax.get_xticks()
-    yticks = ax.get_yticks()
+    if coordinate_origin is not None:
+        divisor = 1_000_000 if coordinate_units == "Mbp" else 1
+        x_end = coordinate_end or coordinate_origin + matrix.shape[1] * offset
+        y_end = coordinate_end or coordinate_origin + matrix.shape[0] * offset
+        x_coordinates = clean_genomic_ticks(
+            coordinate_origin / divisor, x_end / divisor
+        )
+        y_coordinates = clean_genomic_ticks(
+            coordinate_origin / divisor, y_end / divisor
+        )
+        x_fraction = (x_coordinates * divisor - coordinate_origin) / (
+            x_end - coordinate_origin
+        )
+        y_fraction = (y_coordinates * divisor - coordinate_origin) / (
+            y_end - coordinate_origin
+        )
+        xticks = -0.5 + (x_fraction * matrix.shape[1])
+        yticks = -0.5 + (y_fraction * matrix.shape[0])
+    elif aspect == "equal":
+        xticks = np.linspace(-0.5, max(-0.5, matrix.shape[1] - 0.5), 5)
+        yticks = np.linspace(-0.5, max(-0.5, matrix.shape[0] - 0.5), 5)
+    else:
+        xticks = ax.get_xticks()
+        yticks = ax.get_yticks()
 
     ax.set_xticks(xticks)
     ax.set_yticks(yticks)
-    ax.set_xticklabels([f"{x * offset:.2f}" for x in xticks])
-    ax.set_yticklabels([f"{y * offset:.2f}" for y in yticks])
+    if coordinate_origin is not None:
+        ax.set_xticklabels([f"{value:g}" for value in x_coordinates])
+        ax.set_yticklabels([f"{value:g}" for value in y_coordinates])
+    elif aspect == "equal":
+        ax.set_xticklabels([f"{x * offset:,.0f}" for x in xticks])
+        ax.set_yticklabels([f"{y * offset:,.0f}" for y in yticks])
+    else:
+        ax.set_xticklabels([f"{x * offset:.2f}" for x in xticks])
+        ax.set_yticklabels([f"{y * offset:.2f}" for y in yticks])
 
-    # --- multiple highlight regions ---
+    # --- detected diagonal satellites ---
+    if diagonal_ranges is not None:
+        for start, end in diagonal_ranges:
+            start_index = start / offset
+            end_index = end / offset
+            rect = Rectangle(
+                (start_index, start_index),
+                end_index - start_index,
+                end_index - start_index,
+                linewidth=2,
+                edgecolor="#00A651",
+                facecolor="none",
+                zorder=3,
+            )
+            ax.add_patch(rect)
+
+    # --- distal highlight regions ---
     if highlight_ranges is not None:
         for xmin, xmax, ymin, ymax in highlight_ranges:
             # convert scaled values → indices
@@ -405,8 +586,51 @@ def plot_matrix(
                 edgecolor="red",
                 facecolor="red",
                 alpha=0.3,
+                zorder=3,
             )
             ax.add_patch(rect)
+
+    legend_handles = []
+    if edge_overlay is not None and np.any(edge_overlay):
+        from matplotlib.lines import Line2D
+
+        legend_handles.append(
+            Line2D([0], [0], color="#00BFFF", linewidth=2, label="Sobel edges")
+        )
+    if diagonal_ranges:
+        legend_handles.append(
+            Rectangle(
+                (0, 0),
+                1,
+                1,
+                edgecolor="#00A651",
+                facecolor="none",
+                label="Detected satellite",
+            )
+        )
+    if highlight_ranges:
+        legend_handles.append(
+            Rectangle(
+                (0, 0),
+                1,
+                1,
+                edgecolor="red",
+                facecolor="red",
+                alpha=0.3,
+                label="Distal link",
+            )
+        )
+    if legend_handles:
+        if legend_outside:
+            fig.legend(
+                handles=legend_handles,
+                loc="center left",
+                bbox_to_anchor=(0.78, 0.5),
+                borderaxespad=0,
+                fontsize=6,
+            )
+        else:
+            ax.legend(handles=legend_handles, loc="lower right", fontsize=6)
 
         """# --- cross-region (off-diagonal) rectangles ---
     if highlight_ranges is not None:
@@ -456,13 +680,22 @@ def plot_matrix(
                 ax.add_patch(rect_sym)"""
 
     if show_colorbar:
-        plt.colorbar(im, ax=ax, label="Value")
+        if reserve_colorbar_space:
+            fig.subplots_adjust(left=0.12, right=0.76, bottom=0.12, top=0.88)
+        fig.colorbar(im, ax=ax, label=colorbar_label, pad=colorbar_pad)
 
-    plt.tight_layout()
+    if legend_outside:
+        # Keep overlay labels out of the data axes and reserve enough room for
+        # all three handles without changing the matrix's square aspect.
+        fig.tight_layout(rect=(0, 0, 0.76, 1))
+    elif not reserve_colorbar_space:
+        plt.tight_layout()
     if save_path:
-        plt.savefig(save_path, dpi=dpi, bbox_inches="tight")
-
-    plt.show()
+        save_kwargs = {} if aspect == "equal" else {"bbox_inches": "tight"}
+        fig.savefig(save_path, dpi=dpi, **save_kwargs)
+        plt.close(fig)
+    else:
+        plt.show()
 
 
 def read_bed_files(files: Union[str, List[str]]) -> List[pl.DataFrame]:

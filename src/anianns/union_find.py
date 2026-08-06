@@ -1,4 +1,5 @@
 from collections import defaultdict
+import csv
 from scipy import ndimage
 import matplotlib.pyplot as plt
 import numpy as np
@@ -44,6 +45,23 @@ def assign_colors(items, palette_name="tab20"):
     # Map each unique item to a color
     color_map = dict(zip(unique_items, palette))
     return color_map
+
+
+def hashable_ntr_signature(value):
+    """Convert composite NTRPrism metadata into an immutable color key."""
+    if isinstance(value, np.ndarray):
+        value = value.tolist()
+    if isinstance(value, (list, tuple)):
+        return tuple(hashable_ntr_signature(item) for item in value)
+    if isinstance(value, dict):
+        items = (
+            (hashable_ntr_signature(key), hashable_ntr_signature(item))
+            for key, item in value.items()
+        )
+        return tuple(sorted(items, key=repr))
+    if isinstance(value, set):
+        return frozenset(hashable_ntr_signature(item) for item in value)
+    return value
 
 
 def sobel_with_diagonal_probes2(M, thresh=0.6, min_thick=1, figsize=(8, 8)):
@@ -518,6 +536,236 @@ class DSU:
         self.parent[rb] = ra
         self.size[ra] += self.size[rb]
         return True
+
+
+class SatelliteDSU:
+    """Disjoint-set collection of refined satellites linked by distal hits."""
+
+    def __init__(self):
+        self.satellites = []
+        self.dsu = DSU(0)
+        self._key_to_index = {}
+        self._neighbors = defaultdict(set)
+
+    def add_satellite(self, chrom, start, end, **metadata):
+        start = int(start)
+        end = int(end)
+        if end <= start:
+            raise ValueError("satellite end must be greater than start")
+        key = (str(chrom), start, end)
+        existing = self._key_to_index.get(key)
+        if existing is not None:
+            for name, value in metadata.items():
+                if value is not None:
+                    self.satellites[existing][name] = value
+            return existing
+
+        index = len(self.satellites)
+        satellite = {"chrom": key[0], "start": start, "end": end}
+        satellite.update(metadata)
+        self.satellites.append(satellite)
+        self._key_to_index[key] = index
+        self.dsu._grow_to(index + 1)
+        return index
+
+    @staticmethod
+    def _reciprocal_overlap(start1, end1, start2, end2):
+        overlap = max(0, min(end1, end2) - max(start1, start2))
+        if overlap == 0:
+            return 0.0
+        return min(overlap / (end1 - start1), overlap / (end2 - start2))
+
+    def find_satellite(self, chrom, start, end, minimum_overlap=0.5):
+        """Resolve a distal endpoint to its best refined satellite node."""
+        chrom = str(chrom)
+        start = int(start)
+        end = int(end)
+        exact = self._key_to_index.get((chrom, start, end))
+        if exact is not None:
+            return exact
+        best_index = None
+        best_overlap = 0.0
+        for index, satellite in enumerate(self.satellites):
+            if satellite["chrom"] != chrom:
+                continue
+            overlap = self._reciprocal_overlap(
+                start,
+                end,
+                satellite["start"],
+                satellite["end"],
+            )
+            if overlap > best_overlap:
+                best_index = index
+                best_overlap = overlap
+        return best_index if best_overlap >= minimum_overlap else None
+
+    def union(self, first_index, second_index):
+        if first_index == second_index:
+            return False
+        self._neighbors[first_index].add(second_index)
+        self._neighbors[second_index].add(first_index)
+        return self.dsu.union(first_index, second_index)
+
+    def union_by_coordinates(
+        self,
+        chrom1,
+        start1,
+        end1,
+        chrom2,
+        start2,
+        end2,
+        minimum_overlap=0.5,
+    ):
+        """Union the two refined satellites matching a distal relationship."""
+        first = self.find_satellite(chrom1, start1, end1, minimum_overlap)
+        second = self.find_satellite(chrom2, start2, end2, minimum_overlap)
+        if first is None or second is None:
+            return False
+        self.union(first, second)
+        return True
+
+    def component_rows(self):
+        """Return deterministic rows describing every DSU member."""
+        buckets = defaultdict(list)
+        for index in range(len(self.satellites)):
+            buckets[self.dsu.find(index)].append(index)
+
+        groups = sorted(
+            buckets.values(),
+            key=lambda members: min(
+                (
+                    self.satellites[index]["chrom"],
+                    self.satellites[index]["start"],
+                    self.satellites[index]["end"],
+                )
+                for index in members
+            ),
+        )
+        component_for_index = {}
+        component_size = {}
+        for component_number, members in enumerate(groups, start=1):
+            component_id = f"satellite_component_{component_number:04d}"
+            for index in members:
+                component_for_index[index] = component_id
+                component_size[index] = len(members)
+
+        sorted_indices = sorted(
+            range(len(self.satellites)),
+            key=lambda index: (
+                self.satellites[index]["chrom"],
+                self.satellites[index]["start"],
+                self.satellites[index]["end"],
+            ),
+        )
+        rows = []
+        for satellite_number, index in enumerate(sorted_indices, start=1):
+            satellite = self.satellites[index]
+            rows.append(
+                {
+                    "satellite_id": f"satellite_{satellite_number:06d}",
+                    "component_id": component_for_index[index],
+                    "component_size": component_size[index],
+                    "chrom": satellite["chrom"],
+                    "start": satellite["start"],
+                    "end": satellite["end"],
+                    "name": satellite.get("name"),
+                    "monomer": satellite.get("monomer"),
+                    "periodicity": satellite.get("periodicity"),
+                    "is_hor": satellite.get("is_hor"),
+                    "direct_link_count": len(self._neighbors[index]),
+                }
+            )
+        return rows
+
+    def item_rgb_for_annotations(
+        self,
+        chrom,
+        starts,
+        ends,
+        monomers,
+        periodicities,
+        hor_flags,
+    ):
+        """Color annotations by DSU component and exact NTRPrism signature."""
+        values = list(zip(starts, ends, monomers, periodicities, hor_flags))
+        color_keys = []
+        for row_number, (start, end, monomer, periodicity, is_hor) in enumerate(values):
+            index = self.find_satellite(chrom, start, end)
+            if index is None or monomer in (None, 0):
+                # Missing NTRPrism evidence must not cause unrelated calls to
+                # appear matched simply because both values are absent.
+                color_keys.append(("unmatched", str(chrom), row_number))
+                continue
+            color_keys.append(
+                (
+                    "matched",
+                    self.dsu.find(index),
+                    hashable_ntr_signature(monomer),
+                    hashable_ntr_signature(periodicity),
+                    bool(is_hor),
+                )
+            )
+
+        color_map = assign_colors(color_keys)
+        return [
+            ",".join(
+                str(min(255, max(0, int(round(channel * 255)))))
+                for channel in color_map[key]
+            )
+            for key in color_keys
+        ]
+
+    def write_tsv(self, output_path):
+        """Serialize all nodes and their final connected-component IDs."""
+        fieldnames = (
+            "satellite_id",
+            "component_id",
+            "component_size",
+            "chrom",
+            "start",
+            "end",
+            "name",
+            "monomer",
+            "periodicity",
+            "is_hor",
+            "direct_link_count",
+        )
+        with open(output_path, "w", newline="") as handle:
+            writer = csv.DictWriter(handle, fieldnames=fieldnames, delimiter="\t")
+            writer.writeheader()
+            writer.writerows(self.component_rows())
+
+    def write_text(self, output_path):
+        """Write a human-readable summary grouped by DSU component."""
+        rows = self.component_rows()
+        components = defaultdict(list)
+        for row in rows:
+            components[row["component_id"]].append(row)
+        linked_component_count = sum(
+            len(members) > 1 for members in components.values()
+        )
+
+        with open(output_path, "w") as handle:
+            handle.write("Satellite DSU Results\n")
+            handle.write("=====================\n")
+            handle.write(f"Total satellites: {len(rows)}\n")
+            handle.write(f"Total components: {len(components)}\n")
+            handle.write(f"Linked components: {linked_component_count}\n\n")
+
+            for component_id, members in components.items():
+                handle.write(f"[{component_id}] size={len(members)}\n")
+                for row in members:
+                    name = row["name"] if row["name"] is not None else "Unknown"
+                    monomer = (
+                        row["monomer"] if row["monomer"] is not None else "Unknown"
+                    )
+                    handle.write(
+                        f"  {row['satellite_id']} "
+                        f"{row['chrom']}:{row['start']}-{row['end']} "
+                        f"name={name} monomer={monomer} "
+                        f"direct_links={row['direct_link_count']}\n"
+                    )
+                handle.write("\n")
 
 
 class TupleDSU:

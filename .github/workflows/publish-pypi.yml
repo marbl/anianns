@@ -1,0 +1,109 @@
+name: Publish to PyPI
+
+on:
+  push:
+    branches:
+      - main
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    name: Test and build distributions
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+
+      - name: Install test and build dependencies
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install .[dev] build twine
+
+      - name: Run tests
+        run: python -m pytest
+
+      - name: Set a unique PyPI post-release version
+        env:
+          RUN_NUMBER: ${{ github.run_number }}
+        run: |
+          python - <<'PY'
+          import os
+          import re
+          import tomllib
+          from pathlib import Path
+
+          pyproject_path = Path("pyproject.toml")
+          pyproject = pyproject_path.read_text()
+          base_version = tomllib.loads(pyproject)["project"]["version"]
+          if ".post" in base_version:
+              raise SystemExit(
+                  "pyproject.toml must contain a base version without a .post suffix"
+              )
+
+          release_version = f"{base_version}.post{os.environ['RUN_NUMBER']}"
+          pyproject, count = re.subn(
+              r'(?m)^version = "[^"]+"$',
+              f'version = "{release_version}"',
+              pyproject,
+              count=1,
+          )
+          if count != 1:
+              raise SystemExit("Unable to update the project version")
+          pyproject_path.write_text(pyproject)
+
+          const_path = Path("src/anianns/const.py")
+          const_source = const_path.read_text()
+          const_source, count = re.subn(
+              r'(?m)^VERSION = "[^"]+"$',
+              f'VERSION = "{release_version}"',
+              const_source,
+              count=1,
+          )
+          if count != 1:
+              raise SystemExit("Unable to update the CLI version")
+          const_path.write_text(const_source)
+
+          print(f"Building AniAnn's {release_version}")
+          PY
+
+      - name: Build distributions
+        run: python -m build
+
+      - name: Check distributions
+        run: python -m twine check dist/*
+
+      - name: Store distributions
+        uses: actions/upload-artifact@v4
+        with:
+          name: python-package-distributions
+          path: dist/
+          if-no-files-found: error
+
+  publish:
+    name: Publish distributions to PyPI
+    needs: build
+    runs-on: ubuntu-latest
+    environment:
+      name: pypi
+      url: https://pypi.org/p/anianns
+    permissions:
+      id-token: write
+
+    steps:
+      - name: Retrieve distributions
+        uses: actions/download-artifact@v4
+        with:
+          name: python-package-distributions
+          path: dist/
+
+      - name: Publish distributions to PyPI
+        uses: pypa/gh-action-pypi-publish@release/v1
+        with:
+          skip-existing: true
