@@ -246,10 +246,17 @@ def test_promote_unmatched_distal_candidate_after_ntr_validation(monkeypatch):
     link = DistalSatelliteLink(
         100, 500, 1000, 1400, "candidate_to_all", 0.8, 0.9, 0.9, 100
     )
+    observed = {}
+
+    def fake_boundaries(**kwargs):
+        observed.update(kwargs)
+        return 950, 1450, "bsat", (10, False, None, [])
+
+    monkeypatch.setattr(cli, "detect_precise_boundaries", fake_boundaries)
     monkeypatch.setattr(
         cli,
-        "detect_precise_boundaries",
-        lambda **kwargs: (950, 1450, None, (10, False, None, [])),
+        "load_all_kmer_dbs",
+        lambda directory: {"bsat": (21, {"bsat": {1, 2}, "variant": {3}})},
     )
 
     promoted_links = cli.promote_unmatched_distal_candidates(
@@ -265,11 +272,13 @@ def test_promote_unmatched_distal_candidate_after_ntr_validation(monkeypatch):
         seq_len=2000,
         window=100,
         k=21,
+        classify="satellite_db",
     )
 
     assert list(zip(starts, ends)) == [(100, 500), (950, 1450)]
-    assert names == ["known", None]
+    assert names == ["known", "bsat"]
     assert monomers == [171, 10]
+    assert observed["classify"] == {"bsat": {1, 2, 3}}
     assert len(promoted_links) == 1
     assert (promoted_links[0].start2, promoted_links[0].end2) == (950, 1450)
 

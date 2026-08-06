@@ -4,6 +4,7 @@ import csv
 from datetime import datetime
 from tokenize import group
 from anianns.const import ASCII_ART, DESCRIPTION, VERSION
+from anianns.classification import load_all_kmer_dbs
 from itertools import islice
 import polars as pl
 import sys
@@ -1020,10 +1021,17 @@ def promote_unmatched_distal_candidates(
     seq_len,
     window,
     k,
+    classify=False,
     sequence_hashes=None,
     verbose=False,
 ):
     """NTR-validate and add the missing endpoint of one-sided distal links."""
+
+    classification_supersets = False
+    if classify:
+        classification_supersets = {}
+        for db_name, (_kmer, sets_by_name) in load_all_kmer_dbs(classify).items():
+            classification_supersets[db_name] = set().union(*sets_by_name.values())
 
     def overlap(first, second):
         amount = max(0, min(first[1], second[1]) - max(first[0], second[0]))
@@ -1084,7 +1092,7 @@ def promote_unmatched_distal_candidates(
                         k=k,
                         coordinates=unknown_interval,
                         verbose=verbose,
-                        classify=False,
+                        classify=classification_supersets,
                         previous_coordinates=previous,
                         sequence_hashes=sequence_hashes,
                     )
@@ -2518,6 +2526,7 @@ def _run_command(args):
                             seq_len=seq_len,
                             window=win,
                             k=k_param,
+                            classify=args.classify,
                             sequence_hashes=sequence_hashes,
                             verbose=verbosity,
                         )
