@@ -1,8 +1,6 @@
 [![Tests](https://img.shields.io/github/actions/workflow/status/marbl/anianns/tests.yml?branch=main&label=tests)](https://github.com/marbl/anianns/actions/workflows/tests.yml)
 [![PyPI version](https://img.shields.io/pypi/v/anianns)](https://pypi.org/project/anianns/)
 [![Python versions](https://img.shields.io/pypi/pyversions/anianns)](https://pypi.org/project/anianns/)
-[![Coverage](https://img.shields.io/codecov/c/github/marbl/anianns?label=coverage)](https://app.codecov.io/gh/marbl/anianns)
-[![License](https://img.shields.io/github/license/marbl/anianns)](https://github.com/marbl/anianns/blob/main/LICENSE)
 
 ![](images/anianns_logo.png)
 
@@ -280,18 +278,19 @@ Upon running the above command, you should see the following output in `sample_h
 
 ```
 #chrom	start	end	name	score	strand	thickStart	thickEnd	itemRgb
-sample_hap1	67078	407613	147	.	67078	407613	230,57,70
-sample_hap1	634567	669509	5	.	634567	669509	42,157,143
-sample_hap1	669978	1148691	68	.	669978	1148691	241,196,15
-sample_hap1	1148878	1472729	5	.	1148878	1472729	42,157,143
-sample_hap1	1472778	2702615	42	.	1472778	2702615	138,43,226
-sample_hap1	2703054	2729531	68	.	2703054	2729531	241,196,15
-sample_hap1	2729678	2834698	5	.	2729678	2834698	42,157,143
-sample_hap1	3044365	3208742	147	.	3044365	3208742	230,57,70
-sample_hap1	3225177	3297021	48	.	3225177	3297021	30,144,255
+sample_hap1	67178	407613		147	.	67178	407613	31,119,180
+sample_hap1	458676	466557		64	.	458676	466557	174,199,232
+sample_hap1	634665	668075		5	.	634665	668075	255,127,14
+sample_hap1	670071	1148691		68	.	670071	1148691	255,187,120
+sample_hap1	1148878	1472729		5	.	1148878	1472729	44,160,44
+sample_hap1	1472878	2702615		42	.	1472878	2702615	152,223,138
+sample_hap1	2729748	2834698		5	.	2729748	2834698	214,39,40
+sample_hap1	3044478	3208742		147	.	3044478	3208742	255,152,150
+sample_hap1	3225278	3297085		48	.	3225278	3297085	148,103,189
+
 ```
 
-This is a BED file containing inferred satellite intervals. The value in the `score` column indicates the periodicity of the satellite array. Since no k-mer database was used, _AniAnn's_ does not attempt to classify each array. _AniAnn's_ will label arrays it determines to be related as the same color in `itemRgb`.
+This is a BED file containing inferred satellite intervals. The value in the `score` column indicates the periodicity of the satellite array. Since no k-mer database was used, _AniAnn's_ does not attempt to classify each array.
 
 To classify each line of the BED file into a known satellite array, a database of _k_-mers must be used. See [creating an annotation database](#creating-an-annotation-database) for more information. We will use the following provided _k_-mer db for our sample run:
 
@@ -299,18 +298,36 @@ To classify each line of the BED file into a known satellite array, a database o
 
 ```
 #chrom	start	end	name	score	strand	thickStart	thickEnd	itemRgb
-sample_hap1	67078	407613	ACRO	147	.	67078	407613	230,57,70
-sample_hap1	634567	669509	HSat3	5	.	634567	669509	42,157,143
-sample_hap1	669978	1148691	bSat	68	.	669978	1148691	241,196,15
-sample_hap1	1148878	1472729	HSat3	5	.	1148878	1472729	42,157,143
-sample_hap1	1472778	2702615	HSat1A	42	.	1472778	2702615	138,43,226
-sample_hap1	2703054	2729531	bSat	68	.	2703054	2729531	241,196,15
-sample_hap1	2729678	2834698	HSat3	5	.	2729678	2834698	42,157,143
-sample_hap1	3044365	3208742	ACRO	147	.	3044365	3208742	230,57,70
-sample_hap1	3225177	3297021	CER	48	.	3225177	3297021	30,144,255
+sample_hap1	67178	407613	ACRO	147	.	67178	407613	31,119,180
+sample_hap1	458676	466557	Walusat	64	.	458676	466557	174,199,232
+sample_hap1	634665	668075	HSat3	5	.	634665	668075	255,127,14
+sample_hap1	670071	1148691	bSat	68	.	670071	1148691	255,187,120
+sample_hap1	1148878	1472729	HSat3	5	.	1148878	1472729	255,127,14
+sample_hap1	1472878	2702615	HSat1A	42	.	1472878	2702615	152,223,138
+sample_hap1	2729748	2834698	HSat3	5	.	2729748	2834698	255,127,14
+sample_hap1	3044478	3208742	ACRO	147	.	3044478	3208742	31,119,180
+sample_hap1	3225278	3297085	CER	48	.	3225278	3297085	148,103,189
 ```
 
-Note that you *must* use the default k-mer value as the classification database. The default _k_ = 21 
+Note that you *must* use the default k-mer value as the classification database. The default _k_ = 21. _AniAnn's_ will label arrays it determines to be related as the same color in `itemRgb`.
+
+For a more thorough analysis of the region, run `anianns -f sample_sequences/sample_hap1_.fa --distal`
+
+To visualize the matrix evidence behind the annotations, add `--plot`:
+
+`anianns annotate -f sample_sequences/sample_hap1.fa -d sample_hap1_plots --plot`
+
+This saves an annotated Sobel view and a high-resolution spectral identity view
+for each sequence band under `sample_hap1_plots/matrix_plots`. Satellite
+intervals and Sobel edges are labeled on the annotated view, with its legend
+placed outside the matrix. Combining `--plot` with `--distal` also outlines
+supported distal matches and saves any adjacent-band views under
+`matrix_pairs`.
+
+![](images/sample_hap1_matrices_0001_0002_identity.png)
+
+![](images/sample_hap1_matrices_0001_0002.png)
+
 
 #### Repeat Masking
 
